@@ -1,0 +1,25 @@
+    Checking epris-tauri v0.1.0 (D:\2025-27_CS_AI\Projects\Epris_Desktop\apps\epris-tauri\src-tauri)
+error[E0597]: `state` does not live long enough
+    --> src\lib.rs:1629:33
+     |
+1628 |             let state = app_handle.state::<Mutex<OpenCodeState>>();
+     |                 ----- binding `state` declared here
+1629 |             if let Ok(mut oc) = state.lock() {
+     |                                 ^^^^^-------
+     |                                 |
+     |                                 borrowed value does not live long enough
+     |                                 a temporary with access to the borrow is created here ...
+...
+1634 |         }
+     |         -
+     |         |
+     |         `state` dropped here while still borrowed
+     |         ... and the borrow might be used here, when that temporary is dropped and runs the destructor for type `Result<std::sync::MutexGuard<'_, OpenCodeState>, PoisonError<std::sync::MutexGuard<'_, OpenCodeState>>>`
+     |
+help: consider adding semicolon after the expression so its temporaries are dropped sooner, before the local variables declared by the block are dropped
+     |
+1633 |             };
+     |              +
+
+For more information about this error, try `rustc --explain E0597`.
+error: could not compile `epris-tauri` (lib) due to 1 previous error

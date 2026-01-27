@@ -1,0 +1,131 @@
+    Checking epris-tauri v0.1.0 (D:\2025-27_CS_AI\Projects\Epris_Desktop\apps\epris-tauri\src-tauri)
+error[E0433]: failed to resolve: could not find `__cmd__save_dag_head` in `snapshot`
+   --> src\lib.rs:948:23
+    |
+948 |             snapshot::save_dag_head,
+    |                       ^^^^^^^^^^^^^ could not find `__cmd__save_dag_head` in `snapshot`
+
+error[E0433]: failed to resolve: could not find `__cmd__auto_save_snapshot` in `snapshot`
+   --> src\lib.rs:949:23
+    |
+949 |             snapshot::auto_save_snapshot,
+    |                       ^^^^^^^^^^^^^^^^^^ could not find `__cmd__auto_save_snapshot` in `snapshot`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `walkdir`
+   --> src\snapshot.rs:439:18
+    |
+439 |     for entry in walkdir::WalkDir::new(ws_dir) {
+    |                  ^^^^^^^ use of unresolved module or unlinked crate `walkdir`
+    |
+    = help: if you wanted to use a crate named `walkdir`, use `cargo add walkdir` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `walkdir`
+   --> src\snapshot.rs:449:18
+    |
+449 |     for entry in walkdir::WalkDir::new(ss_dir) {
+    |                  ^^^^^^^ use of unresolved module or unlinked crate `walkdir`
+    |
+    = help: if you wanted to use a crate named `walkdir`, use `cargo add walkdir` to add it to your `Cargo.toml`
+
+error[E0425]: cannot find value `OPENCODE_SYSTEM_PROMPT` in this scope
+   --> src\lib.rs:383:66
+    |
+383 |             let system_prompt = format!("{} workspace_path: {}", OPENCODE_SYSTEM_PROMPT, workspace_path);
+    |                                                                  ^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+warning: unused import: `uuid::Uuid`
+ --> src\lib.rs:5:5
+  |
+5 | use uuid::Uuid;
+  |     ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `PathBuf`
+ --> src\snapshot.rs:2:23
+  |
+2 | use std::path::{Path, PathBuf};
+  |                       ^^^^^^^
+
+error[E0282]: type annotations needed
+   --> src\snapshot.rs:440:21
+    |
+440 |         let entry = entry.map_err(|e| e.to_string())?;
+    |                     ^^^^^ cannot infer type
+
+error[E0282]: type annotations needed
+   --> src\snapshot.rs:440:36
+    |
+440 |         let entry = entry.map_err(|e| e.to_string())?;
+    |                                    ^  - type must be known at this point
+    |
+help: consider giving this closure parameter an explicit type
+    |
+440 |         let entry = entry.map_err(|e: /* Type */| e.to_string())?;
+    |                                     ++++++++++++
+
+error[E0282]: type annotations needed
+   --> src\snapshot.rs:442:71
+    |
+442 |             let rel_path = entry.path().strip_prefix(ws_dir).map_err(|e| e.to_string())?;
+    |                                                                       ^  - type must be known at this point
+    |
+help: consider giving this closure parameter an explicit type
+    |
+442 |             let rel_path = entry.path().strip_prefix(ws_dir).map_err(|e: /* Type */| e.to_string())?;
+    |                                                                        ++++++++++++
+
+error[E0282]: type annotations needed
+   --> src\snapshot.rs:443:54
+    |
+443 |             let metadata = entry.metadata().map_err(|e| e.to_string())?;
+    |                                                      ^  - type must be known at this point
+    |
+help: consider giving this closure parameter an explicit type
+    |
+443 |             let metadata = entry.metadata().map_err(|e: /* Type */| e.to_string())?;
+    |                                                       ++++++++++++
+
+error[E0282]: type annotations needed
+   --> src\snapshot.rs:450:21
+    |
+450 |         let entry = entry.map_err(|e| e.to_string())?;
+    |                     ^^^^^ cannot infer type
+
+error[E0282]: type annotations needed
+   --> src\snapshot.rs:450:36
+    |
+450 |         let entry = entry.map_err(|e| e.to_string())?;
+    |                                    ^  - type must be known at this point
+    |
+help: consider giving this closure parameter an explicit type
+    |
+450 |         let entry = entry.map_err(|e: /* Type */| e.to_string())?;
+    |                                     ++++++++++++
+
+error[E0282]: type annotations needed
+   --> src\snapshot.rs:452:71
+    |
+452 |             let rel_path = entry.path().strip_prefix(ss_dir).map_err(|e| e.to_string())?;
+    |                                                                       ^  - type must be known at this point
+    |
+help: consider giving this closure parameter an explicit type
+    |
+452 |             let rel_path = entry.path().strip_prefix(ss_dir).map_err(|e: /* Type */| e.to_string())?;
+    |                                                                        ++++++++++++
+
+error[E0282]: type annotations needed
+   --> src\snapshot.rs:453:54
+    |
+453 |             let metadata = entry.metadata().map_err(|e| e.to_string())?;
+    |                                                      ^  - type must be known at this point
+    |
+help: consider giving this closure parameter an explicit type
+    |
+453 |             let metadata = entry.metadata().map_err(|e: /* Type */| e.to_string())?;
+    |                                                       ++++++++++++
+
+Some errors have detailed explanations: E0282, E0425, E0433.
+For more information about an error, try `rustc --explain E0282`.
+warning: `epris-tauri` (lib) generated 2 warnings
+error: could not compile `epris-tauri` (lib) due to 13 previous errors; 2 warnings emitted

@@ -1,0 +1,17 @@
+    Checking epris-tauri v0.1.0 (D:\2025-27_CS_AI\Projects\Epris_Desktop\apps\epris-tauri\src-tauri)
+warning: function `check_forbidden_files_modified` is never used
+   --> src\lib.rs:226:4
+    |
+226 | fn check_forbidden_files_modified(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `find_project_root` is never used
+   --> src\lib.rs:405:4
+    |
+405 | fn find_project_root(start_path: &Path, anchor: &str) -> Option<PathBuf> {
+    |    ^^^^^^^^^^^^^^^^^
+
+warning: `epris-tauri` (lib) generated 2 warnings
+    Finished `release` profile [optimized] target(s) in 2.67s

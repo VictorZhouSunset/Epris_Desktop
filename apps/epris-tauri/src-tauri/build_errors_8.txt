@@ -1,0 +1,71 @@
+    Checking epris-tauri v0.1.0 (D:\2025-27_CS_AI\Projects\Epris_Desktop\apps\epris-tauri\src-tauri)
+error[E0433]: failed to resolve: use of undeclared type `Uuid`
+   --> src\snapshot.rs:235:15
+    |
+235 |     let sid = Uuid::new_v4().to_string();
+    |               ^^^^ use of undeclared type `Uuid`
+    |
+help: consider importing one of these structs
+    |
+  1 + use crate::Uuid;
+    |
+  1 + use uuid::Uuid;
+    |
+
+error[E0433]: failed to resolve: use of undeclared type `Uuid`
+   --> src\snapshot.rs:260:15
+    |
+260 |     let sid = Uuid::new_v4().to_string();
+    |               ^^^^ use of undeclared type `Uuid`
+    |
+help: consider importing one of these structs
+    |
+  1 + use crate::Uuid;
+    |
+  1 + use uuid::Uuid;
+    |
+
+warning: unused import: `uuid::Uuid`
+ --> src\lib.rs:5:5
+  |
+5 | use uuid::Uuid;
+  |     ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0631]: type mismatch in closure arguments
+   --> src\snapshot.rs:464:45
+    |
+464 |             let metadata = entry.metadata().map_err(|e: std::io::Error| e.to_string())?;
+    |                                             ^^^^^^^ ------------------- found signature defined here
+    |                                             |
+    |                                             expected due to this
+    |
+    = note: expected closure signature `fn(walkdir::Error) -> _`
+               found closure signature `fn(std::io::Error) -> _`
+note: required by a bound in `Result::<T, E>::map_err`
+   --> /rustc/254b59607d4417e9dffbc307138ae5c86280fe4c\library\core\src\result.rs:962:5
+
+error[E0631]: type mismatch in closure arguments
+   --> src\snapshot.rs:474:45
+    |
+474 |             let metadata = entry.metadata().map_err(|e: std::io::Error| e.to_string())?;
+    |                                             ^^^^^^^ ------------------- found signature defined here
+    |                                             |
+    |                                             expected due to this
+    |
+    = note: expected closure signature `fn(walkdir::Error) -> _`
+               found closure signature `fn(std::io::Error) -> _`
+note: required by a bound in `Result::<T, E>::map_err`
+   --> /rustc/254b59607d4417e9dffbc307138ae5c86280fe4c\library\core\src\result.rs:962:5
+
+warning: unused import: `tauri::Manager`
+ --> src\snapshot.rs:3:5
+  |
+3 | use tauri::Manager;
+  |     ^^^^^^^^^^^^^^
+
+Some errors have detailed explanations: E0433, E0631.
+For more information about an error, try `rustc --explain E0433`.
+warning: `epris-tauri` (lib) generated 2 warnings
+error: could not compile `epris-tauri` (lib) due to 4 previous errors; 2 warnings emitted

@@ -1,0 +1,62 @@
+    Checking epris-tauri v0.1.0 (D:\2025-27_CS_AI\Projects\Epris_Desktop\apps\epris-tauri\src-tauri)
+warning: unused import: `PathBuf`
+ --> src\opencode.rs:2:23
+  |
+2 | use std::path::{Path, PathBuf};
+  |                       ^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0599]: no method named `write_all` found for struct `std::fs::File` in the current scope
+   --> src\opencode.rs:263:35
+    |
+263 |         .and_then(|mut file| file.write_all(log_entry.as_bytes()))
+    |                                   ^^^^^^^^^
+    |
+   --> /rustc/254b59607d4417e9dffbc307138ae5c86280fe4c\library\std\src\io\mod.rs:1875:8
+    |
+    = note: the method is available for `std::fs::File` here
+    |
+    = help: items from traits can only be used if the trait is in scope
+help: trait `Write` which provides `write_all` is implemented but not in scope; perhaps you want to import it
+    |
+  1 + use std::io::Write;
+    |
+help: there is a method `write` with a similar name
+    |
+263 -         .and_then(|mut file| file.write_all(log_entry.as_bytes()))
+263 +         .and_then(|mut file| file.write(log_entry.as_bytes()))
+    |
+
+error[E0599]: no method named `write_all` found for struct `std::fs::File` in the current scope
+   --> src\opencode.rs:287:35
+    |
+287 |         .and_then(|mut file| file.write_all(log_entry.as_bytes()))
+    |                                   ^^^^^^^^^
+    |
+   --> /rustc/254b59607d4417e9dffbc307138ae5c86280fe4c\library\std\src\io\mod.rs:1875:8
+    |
+    = note: the method is available for `std::fs::File` here
+    |
+    = help: items from traits can only be used if the trait is in scope
+help: trait `Write` which provides `write_all` is implemented but not in scope; perhaps you want to import it
+    |
+  1 + use std::io::Write;
+    |
+help: there is a method `write` with a similar name
+    |
+287 -         .and_then(|mut file| file.write_all(log_entry.as_bytes()))
+287 +         .and_then(|mut file| file.write(log_entry.as_bytes()))
+    |
+
+warning: unused variable: `session_start`
+  --> src\opencode.rs:91:17
+   |
+91 |             let session_start = std::time::Instant::now();
+   |                 ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_session_start`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+For more information about this error, try `rustc --explain E0599`.
+warning: `epris-tauri` (lib) generated 2 warnings
+error: could not compile `epris-tauri` (lib) due to 2 previous errors; 2 warnings emitted

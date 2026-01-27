@@ -1,0 +1,50 @@
+    Checking epris-tauri v0.1.0 (D:\2025-27_CS_AI\Projects\Epris_Desktop\apps\epris-tauri\src-tauri)
+error[E0599]: no method named `try_state` found for reference `&AppHandle` in the current scope
+    --> src\lib.rs:1621:45
+     |
+1621 |             if let Some(state) = app_handle.try_state::<Mutex<PreviewServerState>>() {
+     |                                             ^^^^^^^^^
+     |
+     = help: items from traits can only be used if the trait is in scope
+help: trait `Manager` which provides `try_state` is implemented but not in scope; perhaps you want to import it
+     |
+   1 + use tauri::Manager;
+     |
+help: there is a method `state` with a similar name
+     |
+1621 -             if let Some(state) = app_handle.try_state::<Mutex<PreviewServerState>>() {
+1621 +             if let Some(state) = app_handle.state::<Mutex<PreviewServerState>>() {
+     |
+
+error[E0282]: type annotations needed
+    --> src\lib.rs:1622:41
+     |
+1622 |                 if let Ok(mut server) = state.lock() {
+     |                                         ^^^^^ cannot infer type
+
+error[E0599]: no method named `try_state` found for reference `&AppHandle` in the current scope
+    --> src\lib.rs:1630:45
+     |
+1630 |             if let Some(state) = app_handle.try_state::<Mutex<OpenCodeState>>() {
+     |                                             ^^^^^^^^^
+     |
+     = help: items from traits can only be used if the trait is in scope
+help: trait `Manager` which provides `try_state` is implemented but not in scope; perhaps you want to import it
+     |
+   1 + use tauri::Manager;
+     |
+help: there is a method `state` with a similar name
+     |
+1630 -             if let Some(state) = app_handle.try_state::<Mutex<OpenCodeState>>() {
+1630 +             if let Some(state) = app_handle.state::<Mutex<OpenCodeState>>() {
+     |
+
+error[E0282]: type annotations needed
+    --> src\lib.rs:1631:37
+     |
+1631 |                 if let Ok(mut oc) = state.lock() {
+     |                                     ^^^^^ cannot infer type
+
+Some errors have detailed explanations: E0282, E0599.
+For more information about an error, try `rustc --explain E0282`.
+error: could not compile `epris-tauri` (lib) due to 4 previous errors

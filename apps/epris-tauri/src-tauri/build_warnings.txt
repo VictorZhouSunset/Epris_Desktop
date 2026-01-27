@@ -1,0 +1,10 @@
+warning: function `check_forbidden_files_modified` is never used
+   --> src\snapshot.rs:200:8
+    |
+200 | pub fn check_forbidden_files_modified(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `epris-tauri` (lib) generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.60s

@@ -1,0 +1,65 @@
+    Checking epris-tauri v0.1.0 (D:\2025-27_CS_AI\Projects\Epris_Desktop\apps\epris-tauri\src-tauri)
+error[E0428]: the name `export` is defined multiple times
+ --> src\lib.rs:9:1
+  |
+6 | mod export;
+  | ----------- previous definition of the module `export` here
+...
+9 | mod export;
+  | ^^^^^^^^^^^ `export` redefined here
+  |
+  = note: `export` must be defined only once in the type namespace of this module
+
+error[E0428]: the name `__cmd__export_video` is defined multiple times
+  --> src\export.rs:25:1
+   |
+25 | #[tauri::command]
+   | ^^^^^^^^^^^^^^^^^
+   | |
+   | `__cmd__export_video` redefined here
+   | previous definition of the macro `__cmd__export_video` here
+   |
+   = note: `__cmd__export_video` must be defined only once in the macro namespace of this module
+   = note: this error originates in the attribute macro `tauri::command` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused imports: `Deserialize` and `Serialize`
+ --> src\lib.rs:1:13
+  |
+1 | use serde::{Serialize, Deserialize};
+  |             ^^^^^^^^^  ^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `std::path::Path`
+ --> src\lib.rs:2:5
+  |
+2 | use std::path::Path;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `std::process::Child`
+ --> src\lib.rs:3:5
+  |
+3 | use std::process::Child;
+  |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::opencode`
+ --> src\export.rs:6:5
+  |
+6 | use crate::opencode;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `PathBuf`
+ --> src\workspace.rs:2:23
+  |
+2 | use std::path::{Path, PathBuf};
+  |                       ^^^^^^^
+
+warning: unused import: `std::io::Write`
+  --> src\lib.rs:15:5
+   |
+15 | use std::io::Write;
+   |     ^^^^^^^^^^^^^^
+
+For more information about this error, try `rustc --explain E0428`.
+warning: `epris-tauri` (lib) generated 6 warnings
+error: could not compile `epris-tauri` (lib) due to 2 previous errors; 6 warnings emitted

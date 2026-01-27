@@ -1,0 +1,138 @@
+    Checking epris-tauri v0.1.0 (D:\2025-27_CS_AI\Projects\Epris_Desktop\apps\epris-tauri\src-tauri)
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `export`
+  --> src\lib.rs:66:13
+   |
+66 |             export::export_video,
+   |             ^^^^^^ use of unresolved module or unlinked crate `export`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `export`
+  --> src\lib.rs:55:28
+   |
+55 |         .manage(Mutex::new(export::ExportState::default()))
+   |                            ^^^^^^ use of unresolved module or unlinked crate `export`
+   |
+help: to make use of source file src\export.rs, use `mod export` in this file to declare the module
+   |
+ 1 + mod export;
+   |
+
+error[E0433]: failed to resolve: use of undeclared type `Mutex`
+  --> src\lib.rs:53:17
+   |
+53 |         .manage(Mutex::new(preview::PreviewServerState::default()))
+   |                 ^^^^^ use of undeclared type `Mutex`
+   |
+help: consider importing one of these structs
+   |
+ 8 + use std::sync::Mutex;
+   |
+ 8 + use std::sync::nonpoison::Mutex;
+   |
+ 8 + use tauri::async_runtime::Mutex;
+   |
+ 8 + use tokio::sync::Mutex;
+   |
+
+error[E0433]: failed to resolve: use of undeclared type `Mutex`
+  --> src\lib.rs:54:17
+   |
+54 |         .manage(Mutex::new(opencode::OpenCodeState::default()))
+   |                 ^^^^^ use of undeclared type `Mutex`
+   |
+help: consider importing one of these structs
+   |
+ 8 + use std::sync::Mutex;
+   |
+ 8 + use std::sync::nonpoison::Mutex;
+   |
+ 8 + use tauri::async_runtime::Mutex;
+   |
+ 8 + use tokio::sync::Mutex;
+   |
+
+error[E0433]: failed to resolve: use of undeclared type `Mutex`
+  --> src\lib.rs:55:17
+   |
+55 |         .manage(Mutex::new(export::ExportState::default()))
+   |                 ^^^^^ use of undeclared type `Mutex`
+   |
+help: consider importing one of these structs
+   |
+ 8 + use std::sync::Mutex;
+   |
+ 8 + use std::sync::nonpoison::Mutex;
+   |
+ 8 + use tauri::async_runtime::Mutex;
+   |
+ 8 + use tokio::sync::Mutex;
+   |
+
+error[E0425]: cannot find type `Mutex` in this scope
+  --> src\lib.rs:88:56
+   |
+88 |             if let Ok(mut server) = app_handle.state::<Mutex<preview::PreviewServerState>>().lock() {
+   |                                                        ^^^^^ not found in this scope
+   |
+help: consider importing one of these structs
+   |
+ 8 + use std::sync::Mutex;
+   |
+ 8 + use std::sync::nonpoison::Mutex;
+   |
+ 8 + use tauri::async_runtime::Mutex;
+   |
+ 8 + use tokio::sync::Mutex;
+   |
+
+error[E0425]: cannot find type `Mutex` in this scope
+  --> src\lib.rs:95:52
+   |
+95 |             if let Ok(mut oc) = app_handle.state::<Mutex<opencode::OpenCodeState>>().lock() {
+   |                                                    ^^^^^ not found in this scope
+   |
+help: consider importing one of these structs
+   |
+ 8 + use std::sync::Mutex;
+   |
+ 8 + use std::sync::nonpoison::Mutex;
+   |
+ 8 + use tauri::async_runtime::Mutex;
+   |
+ 8 + use tokio::sync::Mutex;
+   |
+
+error[E0599]: no method named `state` found for reference `&AppHandle` in the current scope
+  --> src\lib.rs:88:48
+   |
+88 |             if let Ok(mut server) = app_handle.state::<Mutex<preview::PreviewServerState>>().lock() {
+   |                                                ^^^^^
+   |
+   = help: items from traits can only be used if the trait is in scope
+help: trait `Manager` which provides `state` is implemented but not in scope; perhaps you want to import it
+   |
+ 1 + use tauri::Manager;
+   |
+help: there is a method `try_state` with a similar name
+   |
+88 |             if let Ok(mut server) = app_handle.try_state::<Mutex<preview::PreviewServerState>>().lock() {
+   |                                                ++++
+
+error[E0599]: no method named `state` found for reference `&AppHandle` in the current scope
+  --> src\lib.rs:95:44
+   |
+95 |             if let Ok(mut oc) = app_handle.state::<Mutex<opencode::OpenCodeState>>().lock() {
+   |                                            ^^^^^
+   |
+   = help: items from traits can only be used if the trait is in scope
+help: trait `Manager` which provides `state` is implemented but not in scope; perhaps you want to import it
+   |
+ 1 + use tauri::Manager;
+   |
+help: there is a method `try_state` with a similar name
+   |
+95 |             if let Ok(mut oc) = app_handle.try_state::<Mutex<opencode::OpenCodeState>>().lock() {
+   |                                            ++++
+
+Some errors have detailed explanations: E0425, E0433, E0599.
+For more information about an error, try `rustc --explain E0425`.
+error: could not compile `epris-tauri` (lib) due to 9 previous errors

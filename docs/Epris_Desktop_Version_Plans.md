@@ -58,7 +58,7 @@
   - 预览服务（Player 或 dev server）。
   - 渲染 worker（renderer）。
 - Gate：tsc + smoke render（少量帧）失败自动修复再重试。
-- 版本快照：每次改动可回滚。
+- 版本git DAG：每次改动有历史记录。
 - 日志：prompt/改动文件/错误栈落盘。
 
 **服务端开发**

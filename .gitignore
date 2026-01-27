@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+target/
+build/
+out/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Epris Desktop specific
+/workspace/
+/logs/
+
+# Local env files
+.env
+.env.*
+!.env.example
+
+# Git Worktrees
+.worktrees/
