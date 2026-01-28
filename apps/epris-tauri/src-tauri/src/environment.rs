@@ -251,7 +251,10 @@ async fn run_pnpm_install(
     let path_env = std::env::var("PATH").unwrap_or_default();
     let new_path = format!("{};{}", bin_dir.to_string_lossy(), path_env);
 
-    let mut child = crate::utils::create_async_shell_command("pnpm", &["install"])
+    let mut child = crate::utils::create_async_shell_command(
+        "pnpm",
+        &["install", "--frozen-lockfile", "--prefer-offline"],
+    )
         .current_dir(workspace_path)
         .env("PATH", new_path)
         .stdout(Stdio::piped())

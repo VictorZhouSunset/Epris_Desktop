@@ -42,7 +42,10 @@ export function usePreviewServer(workspacePath: string | undefined) {
       setPort(serverPort);
       
       // WAIT for port to be ready
-      await waitPort(serverPort);
+      const ok = await waitPort(serverPort);
+      if (!ok) {
+        throw new Error(`Preview server did not become ready on port ${serverPort}`);
+      }
       
       setStatus('running');
       return serverPort;

@@ -2,9 +2,11 @@ use crate::environment::EnvironmentManager;
 use crate::skills::SkillsManager;
 use crate::state_manager::{ProjectState, StateManager};
 use crate::utils;
+use crate::workspace;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use tauri::Manager;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ProjectInfo {
@@ -63,6 +65,7 @@ fn load_overview(state_mgr: &StateManager) -> ProjectsOverview {
 fn resolve_template_dir(app_handle: &tauri::AppHandle) -> Result<PathBuf, String> {
     #[cfg(debug_assertions)]
     {
+        let _ = app_handle;
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
         let project_root = utils::find_project_root(Path::new(&manifest_dir), "workspace-template")
             .ok_or_else(|| format!("Could not find 'workspace-template' anchor by searching upwards from {:?}", manifest_dir))?;
@@ -104,20 +107,6 @@ fn sanitize_folder_name(name: &str) -> String {
     out.trim_matches('-').to_string()
 }
 
-fn copy_template_to_project(template_dir: &Path, project_dir: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(project_dir).map_err(|e| e.to_string())?;
-    let mut options = fs_extra::dir::CopyOptions::new();
-    options.copy_inside = true;
-    fs_extra::dir::copy(template_dir, project_dir, &options).map_err(|e| e.to_string())?;
-
-    // Remove copied node_modules (contains broken links / huge; reinstall per project).
-    let copied_node_modules = project_dir.join("node_modules");
-    if copied_node_modules.exists() {
-        let _ = std::fs::remove_dir_all(&copied_node_modules);
-    }
-    Ok(())
-}
-
 fn move_dir_robust(src: &Path, dst: &Path) -> Result<(), String> {
     if dst.exists() {
         return Err(format!("Destination already exists: {}", dst.to_string_lossy()));
@@ -131,6 +120,45 @@ fn move_dir_robust(src: &Path, dst: &Path) -> Result<(), String> {
     options.copy_inside = true;
     fs_extra::dir::copy(src, dst, &options).map_err(|e| e.to_string())?;
     std::fs::remove_dir_all(src).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn flatten_if_nested_workspace_template(project_dir: &Path) -> Result<(), String> {
+    let pkg = project_dir.join("package.json");
+    if pkg.exists() {
+        return Ok(());
+    }
+
+    let nested = project_dir.join("workspace-template");
+    let nested_pkg = nested.join("package.json");
+    if !nested_pkg.exists() {
+        return Ok(());
+    }
+
+    // Move children up one level.
+    for entry in std::fs::read_dir(&nested).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let src = entry.path();
+        let name = entry.file_name();
+        let dst = project_dir.join(name);
+
+        if dst.exists() {
+            return Err(format!(
+                "Failed to flatten nested workspace-template: destination already exists: {}",
+                dst.to_string_lossy()
+            ));
+        }
+
+        let ft = entry.file_type().map_err(|e| e.to_string())?;
+        if ft.is_dir() {
+            move_dir_robust(&src, &dst)?;
+        } else {
+            std::fs::copy(&src, &dst).map_err(|e| e.to_string())?;
+            let _ = std::fs::remove_file(&src);
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&nested);
     Ok(())
 }
 
@@ -260,7 +288,11 @@ pub fn create_project(
     let project_dir = root.join(folder_name);
 
     let template_dir = resolve_template_dir(&app_handle)?;
-    copy_template_to_project(&template_dir, &project_dir)?;
+    // Reuse the existing workspace mirroring logic to ensure we copy the template contents
+    // (not a nested folder), and to apply consistent hygiene rules (e.g. remove node_modules).
+    workspace::mirror_workspace(&template_dir, &project_dir)?;
+    // Defensive: if template ended up nested due to platform/resource path edge cases, flatten it.
+    flatten_if_nested_workspace_template(&project_dir)?;
     ensure_public_assets_dir(&project_dir)?;
     ensure_logs_dir(&project_dir)?;
 
@@ -348,6 +380,28 @@ pub fn delete_project(app_handle: tauri::AppHandle, project_id: String) -> Resul
 }
 
 #[tauri::command]
+pub fn rename_project(app_handle: tauri::AppHandle, project_id: String, name: String) -> Result<(), String> {
+    let app_dir = app_handle
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+    let state_mgr = StateManager::new(app_dir);
+    let mut state = state_mgr.read();
+
+    let trimmed = name.trim().to_string();
+    if trimmed.is_empty() {
+        return Err("Project name cannot be empty".to_string());
+    }
+
+    let Some(p) = state.projects.get_mut(&project_id) else {
+        return Err("Project not found".to_string());
+    };
+    p.name = trimmed;
+    state_mgr.write(&state)?;
+    Ok(())
+}
+
+#[tauri::command]
 pub fn get_default_projects_root(app_handle: tauri::AppHandle) -> Result<String, String> {
     Ok(default_projects_root(&app_handle)?.to_string_lossy().to_string())
 }
@@ -390,4 +444,3 @@ pub fn pick_projects_root(initial: Option<String>) -> Result<Option<String>, Str
         Err("Folder picker not implemented for this OS yet".to_string())
     }
 }
-

@@ -1,6 +1,8 @@
 use std::process::Child;
 use std::sync::Mutex;
 use crate::utils;
+use std::io::Write;
+use std::process::Stdio;
 
 pub struct PreviewServerState {
     pub process: Option<Child>,
@@ -30,15 +32,35 @@ pub fn start_preview_server(
     
     let port = utils::find_available_port(3030);
     println!("[Epris] Starting preview server in {} on port {}", workspace_path, port);
-    
-    let child = utils::create_shell_command("pnpm", &["run", "dev", "--port", &port.to_string()])
-        .current_dir(&workspace_path)
-        .spawn()
-        .map_err(|e| {
-            let msg = format!("Failed to spawn preview server: {}", e);
-            println!("[Epris] Error: {}", msg);
-            msg
-        })?;
+
+    let logs_dir = std::path::Path::new(&workspace_path).join("logs");
+    let _ = std::fs::create_dir_all(&logs_dir);
+    let log_path = logs_dir.join("preview.log");
+    let mut log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|e| format!("Failed to open preview.log: {}", e))?;
+    let _ = writeln!(log_file, "\n--- Preview Server Log [{}] ---", chrono::Utc::now());
+
+    let mut cmd = utils::create_shell_command("pnpm", &["run", "dev", "--port", &port.to_string()]);
+    cmd.current_dir(&workspace_path);
+    cmd.stdout(Stdio::from(log_file.try_clone().map_err(|e| e.to_string())?));
+    cmd.stderr(Stdio::from(log_file));
+
+    let mut child = cmd.spawn().map_err(|e| {
+        let msg = format!("Failed to spawn preview server: {}", e);
+        println!("[Epris] Error: {}", msg);
+        msg
+    })?;
+
+    // If the child exits immediately, surface a helpful error.
+    if let Ok(Some(status)) = child.try_wait() {
+        return Err(format!(
+            "Preview server exited immediately (code: {:?}). Check workspace/logs/preview.log",
+            status.code()
+        ));
+    }
     
     server.process = Some(child);
     server.port = port;

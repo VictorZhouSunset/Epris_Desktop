@@ -1,8 +1,8 @@
 use serde::{Serialize, Deserialize};
 use std::path::Path;
-use std::io::Write;
-use crate::utils;
 use crate::state_manager::StateManager;
+use tauri::Manager;
+use walkdir::WalkDir;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WorkspaceConfig {
@@ -30,16 +30,39 @@ pub fn mirror_workspace(template_path: &Path, target_path: &Path) -> Result<(), 
             std::fs::remove_dir_all(target_path)
                 .map_err(|e| format!("[Epris] Failed to clean corrupt workspace: {}", e))?;
         }
-        let mut options = fs_extra::dir::CopyOptions::new();
-        options.copy_inside = true;
-        fs_extra::dir::copy(template_path, target_path, &options)
-            .map_err(|e| format!("[Epris] Failed to copy workspace template: {}", e))?;
-        
-        // Delete copied node_modules (contains broken symlinks to template's .pnpm store)
-        let copied_node_modules = target_path.join("node_modules");
-        if copied_node_modules.exists() {
-            println!("[Epris] Removing copied node_modules (will reinstall fresh)");
-            let _ = std::fs::remove_dir_all(&copied_node_modules);
+        std::fs::create_dir_all(target_path)
+            .map_err(|e| format!("[Epris] Failed to create workspace dir: {}", e))?;
+
+        // Copy everything from template except node_modules (often huge + contains broken links when copied).
+        for entry in WalkDir::new(template_path).follow_links(false) {
+            let entry = entry.map_err(|e| format!("[Epris] Failed to walk template: {}", e))?;
+            let src = entry.path();
+            let rel = src
+                .strip_prefix(template_path)
+                .map_err(|e| format!("[Epris] Failed to relativize template path: {}", e))?;
+
+            if rel.as_os_str().is_empty() {
+                continue;
+            }
+
+            if let Some(first) = rel.components().next() {
+                if first.as_os_str() == "node_modules" {
+                    continue;
+                }
+            }
+
+            let dst = target_path.join(rel);
+            if entry.file_type().is_dir() {
+                std::fs::create_dir_all(&dst)
+                    .map_err(|e| format!("[Epris] Failed to create dir {:?}: {}", dst, e))?;
+            } else if entry.file_type().is_file() {
+                if let Some(parent) = dst.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| format!("[Epris] Failed to create parent dir {:?}: {}", parent, e))?;
+                }
+                std::fs::copy(src, &dst)
+                    .map_err(|e| format!("[Epris] Failed to copy file {:?} -> {:?}: {}", src, dst, e))?;
+            }
         }
     } else {
         println!("[Epris] Workspace already exists at: {:?}", target_path);
@@ -52,22 +75,11 @@ pub fn mirror_workspace(template_path: &Path, target_path: &Path) -> Result<(), 
         }
     }
 
-    // Sync pnpm-lock.yaml and detect changes
+    // Sync pnpm-lock.yaml (best-effort)
     let template_lock = template_path.join("pnpm-lock.yaml");
     let target_lock = target_path.join("pnpm-lock.yaml");
-    let mut lock_changed = false;
 
     if template_lock.exists() {
-        if target_lock.exists() {
-            let template_content = std::fs::read(&template_lock).unwrap_or_default();
-            let target_content = std::fs::read(&target_lock).unwrap_or_default();
-            if template_content != target_content {
-                println!("[Epris] pnpm-lock.yaml changed, triggering reinstall");
-                lock_changed = true;
-            }
-        } else {
-            lock_changed = true;
-        }
         std::fs::copy(&template_lock, &target_lock)
             .map_err(|e| format!("[Epris] Failed to sync pnpm-lock.yaml: {}", e))?;
     }
@@ -75,33 +87,6 @@ pub fn mirror_workspace(template_path: &Path, target_path: &Path) -> Result<(), 
     let logs_path = target_path.join("logs");
     if !logs_path.exists() {
         std::fs::create_dir_all(&logs_path).map_err(|e| format!("[Epris] Failed to create logs dir: {}", e))?;
-    }
-
-    let node_modules_path = target_path.join("node_modules");
-    if !node_modules_path.exists() || lock_changed {
-        println!("[Epris] Installing/Updating dependencies in workspace (lock_changed: {})...", lock_changed);
-        
-        let mut log_file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(logs_path.join("bootstrap.log"))
-            .map_err(|e| format!("[Epris] Failed to open bootstrap.log: {}", e))?;
-        
-        // Write timestamp entry
-        let _ = writeln!(log_file, "\n--- Bootstrap Log [{:?}] ---", std::time::SystemTime::now());
-        
-        // Run pnpm install and captured stdout/stderr
-        let status = utils::create_shell_command("pnpm", &["install"])
-            .current_dir(target_path)
-            .stdout(log_file.try_clone().map_err(|e| e.to_string())?)
-            .stderr(log_file)
-            .status()
-            .map_err(|e| format!("[Epris] Failed to run pnpm install: {}", e))?;
-            
-        if !status.success() {
-             return Err(format!("[Epris] pnpm install failed. Check workspace/logs/bootstrap.log for details. Exit code: {:?}", status.code()));
-        }
-        println!("[Epris] Dependencies installed successfully");
     }
 
     Ok(())

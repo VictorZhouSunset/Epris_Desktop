@@ -3,9 +3,11 @@ import {
   Download,
   FolderOpen,
   Plus,
+  Pencil,
   RefreshCw,
   Save,
   Send,
+  SlidersHorizontal,
   Settings as SettingsIcon,
 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
@@ -37,6 +39,20 @@ function App() {
 
   const [showCreateProject, setShowCreateProject] = useState(false);
   const [defaultProjectsRoot, setDefaultProjectsRoot] = useState('');
+  const [isProjectsPanelOpen, setIsProjectsPanelOpen] = useState(() => {
+    try {
+      return localStorage.getItem('epris:projectsPanelOpen') !== '0';
+    } catch {
+      return true;
+    }
+  });
+  const [isParametersPanelOpen, setIsParametersPanelOpen] = useState(() => {
+    try {
+      return localStorage.getItem('epris:parametersPanelOpen') !== '0';
+    } catch {
+      return true;
+    }
+  });
 
   // Provider State
   const [provider, setProvider] = useState('opencode');
@@ -63,6 +79,7 @@ function App() {
     createProject,
     setActiveProject,
     deleteProject,
+    renameProject,
     getDefaultProjectsRoot,
     pickProjectsRoot,
   } = useProjects();
@@ -154,6 +171,18 @@ function App() {
     setModel('opencode/big-pickle');
   }, [workspacePath]);
 
+  useEffect(() => {
+    try {
+      localStorage.setItem('epris:projectsPanelOpen', isProjectsPanelOpen ? '1' : '0');
+    } catch {}
+  }, [isProjectsPanelOpen]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('epris:parametersPanelOpen', isParametersPanelOpen ? '1' : '0');
+    } catch {}
+  }, [isParametersPanelOpen]);
+
   const handleProviderChange = useCallback((newProvider: string) => {
     setProvider(newProvider);
     if (newProvider === 'gemini') setModel('gemini-3-flash-preview');
@@ -200,6 +229,16 @@ function App() {
   }, [workspacePath]);
 
   const handleCreateProjectClick = useCallback(async () => {
+    // Only ask for ProjectsRoot the first time.
+    if (overview?.projects_root) {
+      try {
+        await createProject(undefined, undefined);
+      } catch (e) {
+        alert('Failed to create project: ' + (e instanceof Error ? e.message : String(e)));
+      }
+      return;
+    }
+
     try {
       const def = await getDefaultProjectsRoot();
       setDefaultProjectsRoot(def);
@@ -208,7 +247,7 @@ function App() {
     } finally {
       setShowCreateProject(true);
     }
-  }, [getDefaultProjectsRoot]);
+  }, [createProject, getDefaultProjectsRoot, overview?.projects_root]);
 
   const handleSelectProject = useCallback(
     async (projectId: string) => {
@@ -251,6 +290,17 @@ function App() {
     [deleteProject, overview],
   );
 
+  const handleRenameProject = useCallback(
+    async (projectId: string) => {
+      const target = overview?.projects.find((p) => p.id === projectId);
+      const currentName = target?.name || 'Project';
+      const next = prompt('Rename project:', currentName);
+      if (!next) return;
+      await renameProject(projectId, next);
+    },
+    [overview, renameProject],
+  );
+
   const overallStatus = useMemo(() => {
     if (!workspacePath) return { text: 'No Project', color: 'bg-slate-500' };
     if (previewStatus === 'starting') return { text: 'Starting Preview...', color: 'bg-yellow-500' };
@@ -286,7 +336,19 @@ function App() {
           <div className="w-8 h-8 rounded-lg bg-indigo-500 flex items-center justify-center">
             <span className="font-bold text-lg">E</span>
           </div>
-          <h1 className="text-xl font-semibold tracking-tight">Epris Desktop</h1>
+          <div className="flex items-center gap-3 min-w-0">
+            <h1 className="text-xl font-semibold tracking-tight">Epris Desktop</h1>
+            {activeProject && (
+              <button
+                onClick={() => handleRenameProject(activeProject.id)}
+                className="max-w-[320px] px-3 py-1.5 rounded-xl bg-slate-800/60 border border-slate-700 text-slate-200 hover:bg-slate-800 transition-colors flex items-center gap-2 min-w-0"
+                title="Rename project"
+              >
+                <span className="text-sm font-bold truncate">{activeProject.name}</span>
+                <Pencil size={14} className="text-slate-400 shrink-0" />
+              </button>
+            )}
+          </div>
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -339,7 +401,7 @@ function App() {
 
           <button
             onClick={() => setShowHistory(true)}
-            className="p-2 hover:bg-slate-800 rounded-lg transition-colors flex items-center gap-1 text-sm text-indigo-400"
+            className="p-2 hover:bg-slate-800 rounded-lg transition-colors flex items-center gap-1 text-sm text-slate-400 hover:text-indigo-400"
             title="Snapshot Timeline"
             disabled={!workspacePath}
           >
@@ -377,14 +439,26 @@ function App() {
 
       {/* Content */}
       <div className="flex-1 min-h-0 flex overflow-hidden">
-        {overview && (
+        {overview && isProjectsPanelOpen && (
           <ProjectsPanel
             projects={overview.projects}
             activeProjectId={overview.active_project_id}
+            onCollapse={() => setIsProjectsPanelOpen(false)}
             onCreate={handleCreateProjectClick}
             onSelect={handleSelectProject}
             onDelete={handleDeleteProject}
+            onRename={handleRenameProject}
           />
+        )}
+
+        {!isProjectsPanelOpen && (
+          <button
+            onClick={() => setIsProjectsPanelOpen(true)}
+            className="w-10 shrink-0 bg-slate-900/60 border-r border-slate-800 hover:bg-slate-800/40 transition-colors flex items-center justify-center text-slate-400 hover:text-slate-200"
+            title="Show Projects"
+          >
+            <FolderOpen size={18} />
+          </button>
         )}
 
         <main className="flex-1 min-h-0 flex flex-col gap-6 p-6 overflow-hidden">
@@ -543,7 +617,22 @@ function App() {
           )}
         </main>
 
-        {workspacePath && <ParametersPanel workspacePath={workspacePath} onApplied={reloadPreview} />}
+        {workspacePath && isParametersPanelOpen && (
+          <ParametersPanel
+            workspacePath={workspacePath}
+            onApplied={reloadPreview}
+            onCollapse={() => setIsParametersPanelOpen(false)}
+          />
+        )}
+        {workspacePath && !isParametersPanelOpen && (
+          <button
+            onClick={() => setIsParametersPanelOpen(true)}
+            className="w-10 shrink-0 bg-slate-900/60 border-l border-slate-800 hover:bg-slate-800/40 transition-colors flex items-center justify-center text-slate-400 hover:text-slate-200"
+            title="Show Parameters"
+          >
+            <SlidersHorizontal size={18} />
+          </button>
+        )}
       </div>
 
       {/* Snapshot History Side Panel */}

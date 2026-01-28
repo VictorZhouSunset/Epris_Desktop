@@ -150,6 +150,7 @@ pub fn run() {
             projects::create_project,
             projects::set_active_project,
             projects::delete_project,
+            projects::rename_project,
             video_config::get_video_config,
             video_config::set_video_config,
             preview::start_preview_server,

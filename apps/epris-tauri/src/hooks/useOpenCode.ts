@@ -43,7 +43,10 @@ export function useOpenCode(workspacePath: string | undefined) {
       setPort(serverPort);
       
       // WAIT for OpenCode health check
-      await waitPort(serverPort);
+      const ok = await waitPort(serverPort);
+      if (!ok) {
+        throw new Error(`OpenCode did not become ready on port ${serverPort}`);
+      }
       
       setStatus('running');
       return serverPort;

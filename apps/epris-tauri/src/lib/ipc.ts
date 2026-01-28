@@ -10,6 +10,7 @@ export const TAURI_COMMANDS = {
   CREATE_PROJECT: 'create_project',
   SET_ACTIVE_PROJECT: 'set_active_project',
   DELETE_PROJECT: 'delete_project',
+  RENAME_PROJECT: 'rename_project',
   START_PREVIEW_SERVER: 'start_preview_server',
   STOP_PREVIEW_SERVER: 'stop_preview_server',
   START_OPENCODE: 'start_opencode',

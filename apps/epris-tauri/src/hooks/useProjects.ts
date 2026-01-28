@@ -57,6 +57,14 @@ export function useProjects() {
     [refresh],
   );
 
+  const renameProject = useCallback(
+    async (projectId: string, name: string) => {
+      await IpcService.call<void>('RENAME_PROJECT', { projectId, name });
+      await refresh();
+    },
+    [refresh],
+  );
+
   const getDefaultProjectsRoot = useCallback(async () => {
     return IpcService.call<string>('GET_DEFAULT_PROJECTS_ROOT');
   }, []);
@@ -85,9 +93,9 @@ export function useProjects() {
     createProject,
     setActiveProject,
     deleteProject,
+    renameProject,
     getDefaultProjectsRoot,
     pickProjectsRoot,
     setProjectsRoot,
   };
 }
-
