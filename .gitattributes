@@ -1,0 +1,40 @@
+# Normalize line endings consistently across platforms.
+* text=auto
+
+# Source / config files should be LF.
+*.rs  text eol=lf
+*.ts  text eol=lf
+*.tsx text eol=lf
+*.js  text eol=lf
+*.jsx text eol=lf
+*.json text eol=lf
+*.md  text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.txt text eol=lf
+pnpm-lock.yaml text eol=lf
+Cargo.lock text eol=lf
+
+# Windows scripts are typically CRLF.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# Common binaries.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.pdf  binary
+*.zip  binary
+*.woff binary
+*.woff2 binary
+*.ttf  binary
+
+# Do not normalize vendored dependencies.
+workspace-template/node_modules/** -text
+apps/epris-tauri/node_modules/** -text
