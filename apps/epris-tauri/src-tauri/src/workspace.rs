@@ -2,6 +2,7 @@ use serde::{Serialize, Deserialize};
 use std::path::Path;
 use std::io::Write;
 use crate::utils;
+use crate::state_manager::StateManager;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WorkspaceConfig {
@@ -108,42 +109,29 @@ pub fn mirror_workspace(template_path: &Path, target_path: &Path) -> Result<(), 
 
 #[tauri::command]
 pub fn get_workspace_config(_app_handle: tauri::AppHandle) -> Result<WorkspaceConfig, String> {
-    #[cfg(debug_assertions)]
-    let (template_path, target_path) = {
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
-        println!("[Epris] Debug Mode - Manifest Dir: {}", manifest_dir);
-        
-        let project_root = utils::find_project_root(Path::new(&manifest_dir), "workspace-template")
-            .ok_or_else(|| format!("[Epris] Could not find 'workspace-template' anchor by searching upwards from {:?}", manifest_dir))?;
+    let app_dir = _app_handle
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| format!("[Epris] Failed to get app data dir: {}", e))?;
 
-        println!("[Epris] Resolved Project Root via anchor: {:?}", project_root);
-        (
-            project_root.join("workspace-template"),
-            project_root.join("workspace"),
-        )
+    let state_mgr = StateManager::new(app_dir);
+    let state = state_mgr.read();
+    let Some(active_id) = state.active_project_id else {
+        return Ok(WorkspaceConfig {
+            path: String::new(),
+            exists: false,
+        });
+    };
+    let Some(p) = state.projects.get(&active_id) else {
+        return Ok(WorkspaceConfig {
+            path: String::new(),
+            exists: false,
+        });
     };
 
-    #[cfg(not(debug_assertions))]
-    let (template_path, target_path) = {
-        let resource_dir = _app_handle.path().resource_dir()
-            .map_err(|e| format!("[Epris] Failed to get resource dir: {}", e))?;
-
-        println!("[Epris] Production Mode - Resource Dir: {:?}", resource_dir);
-
-        let template = _app_handle.path().resolve("workspace-template", tauri::path::BaseDirectory::Resource)
-            .map_err(|e| format!("[Epris] Failed to resolve resource 'workspace-template': {}", e))?;
-        
-        let target = _app_handle.path().app_local_data_dir()
-            .map_err(|e| format!("[Epris] Failed to get app data dir: {}", e))?
-            .join("workspace");
-            
-        (template, target)
-    };
-
-    mirror_workspace(&template_path, &target_path)?;
-
+    let p_path = std::path::Path::new(&p.path);
     Ok(WorkspaceConfig {
-        path: target_path.to_string_lossy().to_string(),
-        exists: target_path.exists(),
+        path: p.path.clone(),
+        exists: p_path.exists(),
     })
 }

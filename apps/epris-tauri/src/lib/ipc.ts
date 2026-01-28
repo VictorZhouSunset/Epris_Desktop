@@ -2,6 +2,14 @@ import { invoke } from '@tauri-apps/api/core';
 
 export const TAURI_COMMANDS = {
   GET_WORKSPACE_CONFIG: 'get_workspace_config',
+  GET_PROJECTS_OVERVIEW: 'get_projects_overview',
+  GET_ACTIVE_PROJECT_CONFIG: 'get_active_project_config',
+  GET_DEFAULT_PROJECTS_ROOT: 'get_default_projects_root',
+  PICK_PROJECTS_ROOT: 'pick_projects_root',
+  SET_PROJECTS_ROOT: 'set_projects_root',
+  CREATE_PROJECT: 'create_project',
+  SET_ACTIVE_PROJECT: 'set_active_project',
+  DELETE_PROJECT: 'delete_project',
   START_PREVIEW_SERVER: 'start_preview_server',
   STOP_PREVIEW_SERVER: 'stop_preview_server',
   START_OPENCODE: 'start_opencode',
@@ -29,6 +37,8 @@ export const TAURI_COMMANDS = {
   SET_GEMINI_API_KEY: 'set_gemini_api_key',
   GET_ENVIRONMENT_STATUS: 'get_environment_status',
   INSTALL_MISSING_DEPENDENCIES: 'install_missing_dependencies',
+  GET_VIDEO_CONFIG: 'get_video_config',
+  SET_VIDEO_CONFIG: 'set_video_config',
 } as const;
 
 export type CommandKey = keyof typeof TAURI_COMMANDS;

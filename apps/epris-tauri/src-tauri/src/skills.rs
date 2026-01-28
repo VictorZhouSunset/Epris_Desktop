@@ -87,6 +87,33 @@ impl SkillsManager {
 
         Ok(())
     }
+
+    pub fn sync_cached_skills_into_workspace_if_present(
+        workspace_path: &str,
+        env_manager: &EnvironmentManager,
+    ) -> Result<(), String> {
+        let toolchain_dir = env_manager.toolchain_dir.clone();
+        let app_data_dir = toolchain_dir
+            .parent()
+            .ok_or("Invalid toolchain_dir (no parent)")?
+            .to_path_buf();
+        let state_mgr = StateManager::new(app_data_dir);
+        let Some(pinned) = state_mgr.read().toolchain.remotion_skills else {
+            return Ok(());
+        };
+        if pinned.commit.is_empty() {
+            return Ok(());
+        }
+
+        let cache_root = toolchain_dir.join("remotion-skills-cache");
+        let cache_dir = cache_root.join(pinned.commit);
+        if !cache_dir.exists() {
+            return Ok(());
+        }
+
+        let ws_path = Path::new(workspace_path);
+        sync_skills_into_workspace(&cache_dir, ws_path).map_err(|e| e.to_string())
+    }
 }
 
 fn workspace_has_any_skill(skills_dir: PathBuf) -> bool {

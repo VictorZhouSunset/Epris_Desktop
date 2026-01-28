@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { X, Cpu, Key, LogIn, CheckCircle2, AlertCircle, Download, RefreshCw, Terminal } from 'lucide-react';
+import { X, Cpu, Key, LogIn, CheckCircle2, AlertCircle, Download, RefreshCw, Terminal, FolderOpen } from 'lucide-react';
 import { IpcService } from '../lib/ipc';
 
 interface SettingsProps {
@@ -34,11 +34,15 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
   const [checkingEnv, setCheckingEnv] = useState(false);
   const [installing, setInstalling] = useState(false);
 
+  const [projectsRoot, setProjectsRoot] = useState<string>('');
+  const [movingProjects, setMovingProjects] = useState(false);
+
   useEffect(() => {
     if (currentProvider === 'gemini') {
       checkAuth();
     }
     checkEnvironment();
+    checkProjectsRoot();
   }, [currentProvider]);
 
   const checkAuth = async () => {
@@ -61,6 +65,44 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
       console.error('Failed to check environment:', e);
     } finally {
       setCheckingEnv(false);
+    }
+  };
+
+  const checkProjectsRoot = async () => {
+    try {
+      const overview = await IpcService.call<any>('GET_PROJECTS_OVERVIEW');
+      if (overview?.projects_root) {
+        setProjectsRoot(overview.projects_root);
+      } else {
+        const def = await IpcService.call<string>('GET_DEFAULT_PROJECTS_ROOT');
+        setProjectsRoot(def);
+      }
+    } catch (e) {
+      console.error('Failed to check projects root:', e);
+    }
+  };
+
+  const handleChangeProjectsRoot = async () => {
+    try {
+      const picked = await IpcService.call<string | null>('PICK_PROJECTS_ROOT', { initial: projectsRoot });
+      if (!picked) return;
+
+      if (
+        !confirm(
+          `Move all projects to this folder?\n\nFrom:\n${projectsRoot}\n\nTo:\n${picked}\n\nThis will move folders on disk.`,
+        )
+      ) {
+        return;
+      }
+
+      setMovingProjects(true);
+      await IpcService.call('SET_PROJECTS_ROOT', { newRoot: picked, moveExisting: true });
+      setProjectsRoot(picked);
+      alert('Projects folder updated.');
+    } catch (e) {
+      alert('Failed to change projects folder: ' + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setMovingProjects(false);
     }
   };
 
@@ -120,6 +162,26 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
         </header>
 
         <div className="space-y-6">
+          {/* Projects Root */}
+          <div className="p-4 bg-slate-800/30 rounded-xl border border-slate-700 space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-medium text-slate-300">Projects Folder</span>
+              <button
+                onClick={handleChangeProjectsRoot}
+                className="px-3 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg text-xs font-bold text-slate-200 transition-colors flex items-center gap-2 disabled:opacity-50"
+                disabled={movingProjects}
+                title="Change projects folder"
+              >
+                <FolderOpen size={14} />
+                {movingProjects ? 'Moving…' : 'Change'}
+              </button>
+            </div>
+            <div className="text-[11px] text-slate-500 break-all">{projectsRoot || '(not set)'}</div>
+            <div className="text-[11px] text-slate-500">
+              Changing this will move existing project folders to the new destination.
+            </div>
+          </div>
+
           {/* Provider Selection */}
           <div className="space-y-3">
             <label className="text-xs uppercase font-black text-slate-500 tracking-widest">AI Provider</label>

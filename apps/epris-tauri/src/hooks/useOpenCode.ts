@@ -72,16 +72,13 @@ export function useOpenCode(workspacePath: string | undefined) {
       const timer = setTimeout(() => {
         start().catch(console.error);
       }, 2000);
-      return () => clearTimeout(timer);
+      return () => {
+        clearTimeout(timer);
+        stop().catch(console.error);
+      };
     }
-  }, [workspacePath, start]);
-
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      stop().catch(console.error);
-    };
-  }, [stop]);
+    stop().catch(console.error);
+  }, [workspacePath, start, stop]);
 
   return { status, port, error, start, stop };
 }

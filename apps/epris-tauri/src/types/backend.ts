@@ -53,3 +53,31 @@ export interface ExportResult {
   output_path?: string;
   error?: string;
 }
+
+export interface ProjectInfo {
+  id: string;
+  name: string;
+  path: string;
+  provider: string;
+  created_at?: string;
+  last_opened_at?: string;
+}
+
+export interface ProjectsOverview {
+  projects_root?: string;
+  active_project_id?: string;
+  projects: ProjectInfo[];
+}
+
+export interface ActiveProjectConfig {
+  path?: string;
+  exists: boolean;
+}
+
+export interface VideoConfig {
+  width: number;
+  height: number;
+  fps: number;
+  duration_frames: number;
+  duration_seconds: number;
+}

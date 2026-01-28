@@ -32,9 +32,25 @@ pub struct WorkspaceState {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct ProjectState {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    pub provider: String, // "opencode" or "gemini"
+    pub created_at: Option<String>,
+    pub last_opened_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct AppStateStore {
     pub toolchain: ToolchainState,
     pub workspaces: HashMap<String, WorkspaceState>,
+
+    // Step 13+: multi-project support (Project == workspace folder)
+    pub projects_root: Option<String>,
+    pub active_project_id: Option<String>,
+    pub projects: HashMap<String, ProjectState>,
+
     pub gemini_api_key: Option<String>,
 }
 

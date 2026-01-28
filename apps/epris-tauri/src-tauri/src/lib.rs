@@ -1,9 +1,11 @@
 mod workspace;
+mod projects;
 mod preview;
 mod opencode;
 mod gate;
 mod snapshot;
 mod export;
+mod video_config;
 mod utils;
 
 use std::sync::Mutex;
@@ -140,6 +142,16 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet, 
             workspace::get_workspace_config,
+            projects::get_projects_overview,
+            projects::get_active_project_config,
+            projects::get_default_projects_root,
+            projects::pick_projects_root,
+            projects::set_projects_root,
+            projects::create_project,
+            projects::set_active_project,
+            projects::delete_project,
+            video_config::get_video_config,
+            video_config::set_video_config,
             preview::start_preview_server,
             preview::stop_preview_server,
             opencode::start_opencode,

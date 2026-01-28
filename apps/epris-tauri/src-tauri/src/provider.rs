@@ -115,7 +115,7 @@ impl ProviderManager {
         Ok(port)
     }
 
-    fn ensure_rule_files(workspace_path: &str) -> Result<(), String> {
+    pub fn ensure_rule_files(workspace_path: &str) -> Result<(), String> {
         let ws = std::path::Path::new(workspace_path);
         let remotion_md = ws.join("REMOTION.md");
         let gemini_dir = ws.join(".gemini");
@@ -302,4 +302,3 @@ pub async fn start_provider_cmd(
     let mut ps = state.lock().map_err(|e| e.to_string())?;
     ProviderManager::start(&mut ps, &workspace_path, &provider, &env_manager)
 }
-

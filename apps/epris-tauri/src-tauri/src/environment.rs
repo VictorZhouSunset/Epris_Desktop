@@ -6,6 +6,8 @@ use std::os::windows::process::CommandExt;
 use crate::state_manager::{ToolchainState, ToolchainVersion};
 use tauri::{Manager, Emitter};
 use walkdir::WalkDir;
+use std::process::Stdio;
+use tokio::io::{AsyncBufReadExt, BufReader};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EnvironmentStatus {
@@ -215,7 +217,17 @@ pub async fn install_missing_dependencies(
             "percent": percent
         }));
         let _ = window.emit("env_install_log", format!("Stage: {}", step));
-        
+
+        if step == "Bootstrapping workspace" {
+            let app_dir = window
+                .app_handle()
+                .path()
+                .app_local_data_dir()
+                .map_err(|e| e.to_string())?;
+            let env_manager = EnvironmentManager::new(app_dir);
+            run_pnpm_install(&window, &workspace_path, &env_manager).await?;
+        }
+
         if step == "Installing Remotion skills" {
              let app_dir = window.app_handle().path().app_local_data_dir().map_err(|e| e.to_string())?;
              let env_manager = EnvironmentManager::new(app_dir);
@@ -225,6 +237,56 @@ pub async fn install_missing_dependencies(
         tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
     }
 
+    Ok(())
+}
+
+async fn run_pnpm_install(
+    window: &tauri::Window,
+    workspace_path: &str,
+    env_manager: &EnvironmentManager,
+) -> Result<(), String> {
+    let _ = window.emit("env_install_log", "Running pnpm install...".to_string());
+
+    let bin_dir = env_manager.get_bin_dir();
+    let path_env = std::env::var("PATH").unwrap_or_default();
+    let new_path = format!("{};{}", bin_dir.to_string_lossy(), path_env);
+
+    let mut child = crate::utils::create_async_shell_command("pnpm", &["install"])
+        .current_dir(workspace_path)
+        .env("PATH", new_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn pnpm install: {}", e))?;
+
+    let stdout = child.stdout.take().ok_or("Failed to capture pnpm stdout")?;
+    let stderr = child.stderr.take().ok_or("Failed to capture pnpm stderr")?;
+    let mut stdout_reader = BufReader::new(stdout).lines();
+    let mut stderr_reader = BufReader::new(stderr).lines();
+
+    let w1 = window.clone();
+    let stdout_task = tokio::spawn(async move {
+        while let Ok(Some(line)) = stdout_reader.next_line().await {
+            let _ = w1.emit("env_install_log", line);
+        }
+    });
+
+    let w2 = window.clone();
+    let stderr_task = tokio::spawn(async move {
+        while let Ok(Some(line)) = stderr_reader.next_line().await {
+            let _ = w2.emit("env_install_log", line);
+        }
+    });
+
+    let status = child.wait().await.map_err(|e| e.to_string())?;
+    let _ = stdout_task.await;
+    let _ = stderr_task.await;
+
+    if !status.success() {
+        return Err(format!("pnpm install failed (exit code: {:?})", status.code()));
+    }
+
+    let _ = window.emit("env_install_log", "pnpm install completed.".to_string());
     Ok(())
 }
 
