@@ -5,6 +5,7 @@ use std::process::Child;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use crate::utils;
+use crate::sandbox;
 use crate::snapshot;
 use crate::gate::{self, GateMode, GateResult};
 use tauri::{Manager, Emitter};
@@ -123,6 +124,7 @@ pub async fn send_prompt(
         let _ = app_handle.emit("prompt-progress", PromptProgress { percent: 10.0, step: "Creating pre-flight backup".into() });
         println!("[Epris] Step 1/5: Creating pre-flight backup (Gemini)...");
         snapshot::create_backup(&workspace_path, "pre_flight")?;
+        let ai_started_at = std::time::SystemTime::now();
 
         // Step 2: Run CLI
         let _ = app_handle.emit("prompt-progress", PromptProgress { percent: 20.0, step: "AI Generating Animation Code".into() });
@@ -182,6 +184,36 @@ pub async fn send_prompt(
              return Ok(PromptResponse {
                 success: false,
                 message: format!("🔒 Security violation: Files protected. Reverted."),
+                gate_result: None,
+                snapshot_id: None,
+                canceled: false,
+                validation_skipped: false,
+            });
+        }
+
+        // Directory & boundary audit (best-effort): forbid node_modules/.git writes, and any writes outside allowed dirs.
+        let audit = sandbox::audit_workspace_after_ai_run(Path::new(&workspace_path), ai_started_at)?;
+        if audit.incomplete {
+            let _ = log_security_audit_note(
+                &workspace_path,
+                &prompt,
+                "Workspace audit was best-effort (timed out scanning large directories).",
+            );
+        }
+        if !audit.violations.is_empty() {
+            let _ = log_security_violation(
+                &workspace_path,
+                &audit.violations,
+                &prompt,
+                std::collections::HashMap::new(),
+            );
+            snapshot::restore_backup(&workspace_path, "pre_flight")?;
+            return Ok(PromptResponse {
+                success: false,
+                message: format!(
+                    "🔒 Security violation: AI wrote to forbidden paths: {}. Changes reverted.",
+                    audit.violations.join(", ")
+                ),
                 gate_result: None,
                 snapshot_id: None,
                 canceled: false,
@@ -293,6 +325,7 @@ pub async fn send_prompt(
     println!("[Epris] Step 1/5: Creating pre-flight backup...");
     let _ = app_handle.emit("prompt-progress", PromptProgress { percent: 10.0, step: "Creating pre-flight backup".into() });
     snapshot::create_backup(&workspace_path, "pre_flight")?;
+    let ai_started_at = std::time::SystemTime::now();
     
     println!("[Epris] Step 2/5: Sending prompt to AI: \"{}\"", prompt);
     let _ = app_handle.emit("prompt-progress", PromptProgress { percent: 20.0, step: "AI Generating Animation Code".into() });
@@ -381,6 +414,36 @@ pub async fn send_prompt(
         return Ok(PromptResponse {
             success: false,
             message: format!("🔒 Security violation: AI attempted to modify protected files: {}. Changes reverted.", forbidden_files.join(", ")),
+            gate_result: None,
+            snapshot_id: None,
+            canceled: false,
+            validation_skipped: false,
+        });
+    }
+
+    let audit = sandbox::audit_workspace_after_ai_run(Path::new(&workspace_path), ai_started_at)?;
+    if audit.incomplete {
+        let _ = log_security_audit_note(
+            &workspace_path,
+            &prompt,
+            "Workspace audit was best-effort (timed out scanning large directories).",
+        );
+    }
+    if !audit.violations.is_empty() {
+        let _ = log_security_violation(
+            &workspace_path,
+            &audit.violations,
+            &prompt,
+            std::collections::HashMap::new(),
+        );
+        println!("[Epris] Restoring from pre-flight backup...");
+        snapshot::restore_backup(&workspace_path, "pre_flight")?;
+        return Ok(PromptResponse {
+            success: false,
+            message: format!(
+                "🔒 Security violation: AI wrote to forbidden paths: {}. Changes reverted.",
+                audit.violations.join(", ")
+            ),
             gate_result: None,
             snapshot_id: None,
             canceled: false,
@@ -664,6 +727,26 @@ pub fn log_security_violation(
             log_entry.push_str(&format!("\nFile: {}\n{}\n", file, diff));
         }
     }
+
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .and_then(|mut file| file.write_all(log_entry.as_bytes()))
+        .map_err(|e| e.to_string())
+}
+
+fn log_security_audit_note(workspace_path: &str, prompt: &str, note: &str) -> Result<(), String> {
+    let log_dir = Path::new(workspace_path).join("logs");
+    std::fs::create_dir_all(&log_dir).map_err(|e| e.to_string())?;
+
+    let log_path = log_dir.join("security.log");
+    let log_entry = format!(
+        "[{}] 🔎 AUDIT NOTE\nPrompt: {}\n{}\n",
+        chrono::Utc::now().to_rfc3339(),
+        prompt,
+        note
+    );
 
     std::fs::OpenOptions::new()
         .create(true)

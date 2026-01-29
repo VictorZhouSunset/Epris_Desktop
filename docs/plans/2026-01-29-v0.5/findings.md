@@ -17,6 +17,8 @@
 - Added scaffolding for Tauri updater (plugin deps, config, capability) + Settings UI section.
 - Added GitHub Actions release pipeline (Windows) to build installer + updater artifacts and upload `latest.json`.
 - Verified Rust backend builds under WSL via `cargo check` (using `CARGO_HOME=/tmp/cargo-home` and `CARGO_TARGET_DIR=/tmp/epris-tauri-target` to stay within sandbox writeable roots).
+- Implemented Step 8 audit+rollback guardrails for provider runs and documented them in `docs/sandbox.md`.
+- Added V0.5 baseline docs: `docs/data-layout.md`, `docs/security-baseline.md`.
 
 ## Remaining blockers
 - Need the JS deps installed (`pnpm install` in `apps/epris-tauri`) after adding `@tauri-apps/plugin-updater`.

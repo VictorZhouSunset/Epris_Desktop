@@ -9,6 +9,7 @@ mod video_config;
 mod utils;
 mod assets;
 mod stt;
+mod sandbox;
 
 use std::sync::Mutex;
 use tauri::Manager;
@@ -171,19 +172,18 @@ fn get_app_state(app_handle: tauri::AppHandle) -> Result<AppStateStore, String> 
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let app = tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
+    let mut builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
+
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    }
+
+    let app = builder
         .manage(Mutex::new(preview::PreviewServerState::default()))
         .manage(Mutex::new(opencode::OpenCodeState::default()))
         .manage(Mutex::new(export::ExportState::default()))
         .setup(|app| {
-            #[cfg(desktop)]
-            {
-                if let Err(e) = app.handle().plugin(tauri_plugin_updater::Builder::new().build()) {
-                    eprintln!("[Epris] Failed to initialize updater plugin: {}", e);
-                }
-            }
-
             // Signal Handler for Ctrl+C (Terminal Exit)
             let handle = app.handle().clone();
             ctrlc::set_handler(move || {
