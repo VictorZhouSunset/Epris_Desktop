@@ -66,6 +66,15 @@ export function usePrompt(
         model: modelOverride || model
       });
       
+      if (response.canceled) {
+        setLastResponse(null);
+        setStatus('idle');
+        setProgress(0);
+        setCurrentStep('');
+        setError(null);
+        return;
+      }
+
       setLastResponse(response);
       setStatus('success');
       setProgress(100);

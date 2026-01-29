@@ -1,7 +1,9 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { X, Cpu, Key, LogIn, CheckCircle2, AlertCircle, Download, RefreshCw, Terminal, FolderOpen } from 'lucide-react';
 import { IpcService } from '../lib/ipc';
+import type { SttStatus } from '../types/backend';
 
 interface SettingsProps {
   onClose: () => void;
@@ -37,13 +39,56 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
   const [projectsRoot, setProjectsRoot] = useState<string>('');
   const [movingProjects, setMovingProjects] = useState(false);
 
+  const [stt, setStt] = useState<SttStatus | null>(null);
+  const [sttInstalling, setSttInstalling] = useState(false);
+  const [sttModel, setSttModel] = useState<'tiny' | 'tiny.en' | 'small'>('tiny.en');
+  const [sttTask, setSttTask] = useState<'transcribe' | 'translate'>('transcribe');
+  const [sttLogs, setSttLogs] = useState<string[]>([]);
+  const [sttProgress, setSttProgress] = useState<string>('');
+
+  useEffect(() => {
+    const saved = window.localStorage.getItem('epris_stt_model_selection');
+    if (saved === 'tiny' || saved === 'tiny.en' || saved === 'small') {
+      setSttModel(saved as 'tiny' | 'tiny.en' | 'small');
+    }
+    const savedTask = window.localStorage.getItem('epris_stt_task_selection');
+    if (savedTask === 'transcribe' || savedTask === 'translate') {
+      setSttTask(savedTask);
+    }
+  }, []);
+
   useEffect(() => {
     if (currentProvider === 'gemini') {
       checkAuth();
     }
     checkEnvironment();
     checkProjectsRoot();
+    checkStt();
   }, [currentProvider]);
+
+  useEffect(() => {
+    const unlisten = listen<string>('stt_install_log', (e) => {
+      setSttLogs((prev) => [...prev.slice(-99), e.payload]);
+    });
+    const unlistenProgress = listen<any>('stt_install_progress', (e) => {
+      const p = e.payload || {};
+      const label = String(p.label || 'Downloading');
+      const downloaded = typeof p.downloaded_bytes === 'number' ? p.downloaded_bytes : 0;
+      const total = typeof p.total_bytes === 'number' ? p.total_bytes : null;
+      const percent = typeof p.percent === 'number' ? p.percent : null;
+      const mb = (n: number) => (n / (1024 * 1024)).toFixed(1);
+
+      if (total && percent !== null && total > 0) {
+        setSttProgress(`${label}: ${mb(downloaded)} / ${mb(total)} MB (${Math.round(percent)}%)`);
+      } else {
+        setSttProgress(`${label}: ${mb(downloaded)} MB`);
+      }
+    });
+    return () => {
+      unlisten.then((f) => f());
+      unlistenProgress.then((f) => f());
+    };
+  }, []);
 
   const checkAuth = async () => {
     setApiKeyStatus('checking');
@@ -79,6 +124,78 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
       }
     } catch (e) {
       console.error('Failed to check projects root:', e);
+    }
+  };
+
+  const checkStt = async () => {
+    try {
+      const s = await invoke<SttStatus>('get_stt_status');
+      setStt(s);
+      const saved = window.localStorage.getItem('epris_stt_model_selection');
+      if (saved === 'tiny' || saved === 'tiny.en' || saved === 'small') {
+        setSttModel(saved as 'tiny' | 'tiny.en' | 'small');
+      } else {
+        const model = String(s.model || '').toLowerCase();
+        if (model.includes('ggml-small')) setSttModel('small');
+        else if (model.includes('ggml-tiny.') && !model.includes('tiny.en')) setSttModel('tiny');
+        else if (model.includes('ggml-tiny.en')) setSttModel('tiny.en');
+      }
+      const savedTask = window.localStorage.getItem('epris_stt_task_selection');
+      if (savedTask === 'transcribe' || savedTask === 'translate') {
+        setSttTask(savedTask);
+      } else {
+        const t = String(s.task || '').toLowerCase();
+        if (t === 'translate') setSttTask('translate');
+        else setSttTask('transcribe');
+      }
+    } catch {
+      setStt({ installed: false, binary_ok: false, model_ok: false });
+    }
+  };
+
+  const handleInstallStt = async () => {
+    setSttInstalling(true);
+    setSttLogs([]);
+    setSttProgress('');
+    try {
+      const s = await invoke<SttStatus>('install_whispercpp', { model: sttModel });
+      setStt(s);
+      alert('Voice-to-Text installed.');
+    } catch (e) {
+      alert('Voice-to-Text installation failed: ' + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setSttInstalling(false);
+    }
+  };
+
+  const handleUseSttModel = async () => {
+    setSttInstalling(true);
+    setSttLogs([]);
+    setSttProgress('');
+    try {
+      const s = await invoke<SttStatus>('set_stt_model', { model: sttModel });
+      setStt(s);
+      alert('Voice-to-Text model switched.');
+    } catch (e) {
+      alert('Failed to switch model: ' + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setSttInstalling(false);
+    }
+  };
+
+  const applySttTask = async (task: 'transcribe' | 'translate', silent?: boolean) => {
+    setSttInstalling(true);
+    setSttLogs([]);
+    setSttProgress('');
+    try {
+      const s = await invoke<SttStatus>('set_stt_task', { task });
+      setStt(s);
+      if (!silent) alert('Voice-to-Text output mode updated.');
+    } catch (e) {
+      if (!silent) alert('Failed to update output mode: ' + (e instanceof Error ? e.message : String(e)));
+      console.error('Failed to update STT task:', e);
+    } finally {
+      setSttInstalling(false);
     }
   };
 
@@ -263,6 +380,109 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
                  {installing ? <RefreshCw size={14} className="animate-spin" /> : <Download size={14} />}
                  {installing ? 'Installing to Toolchain...' : 'Install Missing Dependencies'}
                </button>
+            )}
+          </div>
+
+          {/* Voice-to-Text (Optional) */}
+          <div className="p-4 bg-slate-800/30 rounded-xl border border-slate-700 space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-medium text-slate-300">Voice-to-Text (Optional)</span>
+              {stt?.installed ? (
+                <span className="flex items-center gap-1.5 text-xs font-bold text-emerald-400">
+                  <CheckCircle2 size={14} /> Installed
+                </span>
+              ) : (
+                <span className="flex items-center gap-1.5 text-xs font-bold text-slate-400">
+                  <AlertCircle size={14} /> Not installed
+                </span>
+              )}
+            </div>
+
+            <div className="text-[11px] text-slate-500">
+              Installs whisper.cpp + a small model for offline transcription (Windows only).
+            </div>
+
+            <div className="flex items-center gap-2">
+              <select
+                className="flex-1 px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-200"
+                value={sttModel}
+                onChange={(e) => {
+                  const v = e.target.value as 'tiny' | 'tiny.en' | 'small';
+                  setSttModel(v);
+                  window.localStorage.setItem('epris_stt_model_selection', v);
+                }}
+                disabled={sttInstalling}
+              >
+                <option value="tiny">tiny (multilingual, fastest)</option>
+                <option value="tiny.en">tiny.en (English-only)</option>
+                <option value="small">small (multilingual, better accuracy)</option>
+              </select>
+              <button
+                onClick={handleUseSttModel}
+                className="px-3 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg text-xs font-bold text-slate-200 transition-colors flex items-center gap-2 disabled:opacity-50"
+                disabled={sttInstalling}
+                title="Use selected model (no download)"
+              >
+                <CheckCircle2 size={14} />
+                Use
+              </button>
+              <button
+                onClick={handleInstallStt}
+                className="px-3 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-xs font-bold text-white transition-colors flex items-center gap-2 disabled:opacity-50"
+                disabled={sttInstalling}
+              >
+                <Download size={14} />
+                {sttInstalling ? 'Installing…' : 'Install'}
+              </button>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <select
+                className="flex-1 px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-200"
+                value={sttTask}
+                onChange={(e) => {
+                  const v = e.target.value as 'transcribe' | 'translate';
+                  setSttTask(v);
+                  window.localStorage.setItem('epris_stt_task_selection', v);
+                  // Apply immediately to avoid confusion (best-effort, no modal alerts).
+                  void applySttTask(v, true);
+                }}
+                disabled={sttInstalling}
+              >
+                <option value="transcribe">Transcribe (keep original language)</option>
+                <option value="translate">Translate to English</option>
+              </select>
+              <button
+                onClick={() => void applySttTask(sttTask)}
+                className="px-3 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg text-xs font-bold text-slate-200 transition-colors flex items-center gap-2 disabled:opacity-50"
+                disabled={sttInstalling}
+                title="Apply output mode"
+              >
+                <CheckCircle2 size={14} />
+                Apply
+              </button>
+            </div>
+
+            {!!stt?.model && (
+              <div className="text-[11px] text-slate-500 break-all">Model: {stt.model}</div>
+            )}
+            {!!stt?.model && sttModel && (
+              <div className="text-[11px] text-slate-500">
+                Selected: {sttModel} {sttModel === 'tiny.en' ? '(English-only)' : '(multilingual)'}
+              </div>
+            )}
+            {!!stt?.task && (
+              <div className="text-[11px] text-slate-500">Output: {stt.task}</div>
+            )}
+
+            {sttInstalling && sttProgress && (
+              <div className="text-[11px] text-slate-300 font-mono">{sttProgress}</div>
+            )}
+
+            {sttLogs.length > 0 && (
+              <div className="bg-slate-950/60 border border-slate-800 rounded-lg p-2 text-[11px] text-slate-300 font-mono max-h-32 overflow-auto whitespace-pre-wrap">
+                {sttLogs.slice(-20).join('\n')}
+              </div>
             )}
           </div>
 

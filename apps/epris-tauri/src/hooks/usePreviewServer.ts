@@ -18,12 +18,10 @@ async function waitPort(port: number, timeout = 10000) {
 
 export type PreviewServerStatus = 'stopped' | 'starting' | 'running' | 'error';
 
-export function usePreviewServer(workspacePath: string | undefined) {
+export function usePreviewServer(workspacePath: string | undefined, enabled: boolean) {
   const [status, setStatus] = useState<PreviewServerStatus>('stopped');
   const [port, setPort] = useState<number | null>(null);
   const [error, setError] = useState<Error | null>(null);
-  
-
 
   const start = useCallback(async () => {
     console.log('[Epris Frontend] Starting preview server for:', workspacePath);
@@ -52,6 +50,7 @@ export function usePreviewServer(workspacePath: string | undefined) {
     } catch (err) {
       setError(err instanceof Error ? err : new Error(String(err)));
       setStatus('error');
+      setPort(null);
       throw err;
     }
   }, [workspacePath]);
@@ -68,8 +67,8 @@ export function usePreviewServer(workspacePath: string | undefined) {
 
   // Auto-start when workspace becomes available
   useEffect(() => {
-    console.log('[Epris Frontend] usePreviewServer effect', { workspacePath });
-    if (workspacePath) {
+    console.log('[Epris Frontend] usePreviewServer effect', { workspacePath, enabled });
+    if (workspacePath && enabled) {
       // Add delay to allow server to fully initialize
       const timer = setTimeout(() => {
         start().catch(console.error);
@@ -79,9 +78,9 @@ export function usePreviewServer(workspacePath: string | undefined) {
         stop().catch(console.error);
       };
     }
-    // If workspacePath becomes undefined, ensure we stop.
+    // If disabled or workspacePath becomes undefined, ensure we stop.
     stop().catch(console.error);
-  }, [workspacePath, start, stop]);
+  }, [workspacePath, enabled, start, stop]);
 
   return { status, port, error, start, stop };
 }

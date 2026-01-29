@@ -18,6 +18,8 @@ export interface PromptResponse {
   gate_result?: GateResult;
   snapshot_id?: string;
   snapshot_timestamp?: string;
+  canceled?: boolean;
+  validation_skipped?: boolean;
 }
 
 export interface SnapshotMetadata {
@@ -80,4 +82,18 @@ export interface VideoConfig {
   fps: number;
   duration_frames: number;
   duration_seconds: number;
+}
+
+export interface AssetInfo {
+  name: string;
+  rel_path: string;
+  size_bytes: number;
+}
+
+export interface SttStatus {
+  installed: boolean;
+  binary_ok: boolean;
+  model_ok: boolean;
+  model?: string;
+  task?: string;
 }

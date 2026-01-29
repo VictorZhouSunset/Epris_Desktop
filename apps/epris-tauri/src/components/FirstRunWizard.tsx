@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { RefreshCw, Check, AlertTriangle, Loader2, Download } from 'lucide-react';
+import type { SttStatus } from '../types/backend';
 
 interface EnvironmentStatus {
   node_valid: boolean;
@@ -30,6 +31,11 @@ export function FirstRunWizard({ workspacePath, provider, onComplete }: FirstRun
   const [error, setError] = useState<string | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [progress, setProgress] = useState<{ step: string; percent: number } | null>(null);
+  const [stt, setStt] = useState<SttStatus | null>(null);
+  const [sttInstalling, setSttInstalling] = useState(false);
+  const [sttLogs, setSttLogs] = useState<string[]>([]);
+  const [sttProgress, setSttProgress] = useState<string>('');
+  const [sttModel, setSttModel] = useState<'tiny' | 'tiny.en' | 'small'>('tiny.en');
 
   const checkEnv = useCallback(async () => {
     if (!workspacePath) return;
@@ -58,9 +64,23 @@ export function FirstRunWizard({ workspacePath, provider, onComplete }: FirstRun
     }
   }, [workspacePath, provider, onComplete]);
 
+  const checkStt = useCallback(async () => {
+    try {
+      const s = await invoke<SttStatus>('get_stt_status');
+      setStt(s);
+      const model = String(s.model || '').toLowerCase();
+      if (model.includes('ggml-small')) setSttModel('small');
+      else if (model.includes('ggml-tiny.') && !model.includes('tiny.en')) setSttModel('tiny');
+      else if (model.includes('ggml-tiny.en')) setSttModel('tiny.en');
+    } catch {
+      setStt({ installed: false, binary_ok: false, model_ok: false });
+    }
+  }, []);
+
   useEffect(() => {
     checkEnv();
-  }, [checkEnv]);
+    void checkStt();
+  }, [checkEnv, checkStt]);
 
   useEffect(() => {
     // Listen for install progress
@@ -70,10 +90,29 @@ export function FirstRunWizard({ workspacePath, provider, onComplete }: FirstRun
     const unlistenLogs = listen<string>('env_install_log', (e) => {
       setLogs(prev => [...prev.slice(-99), e.payload]);
     });
+    const unlistenSttLogs = listen<string>('stt_install_log', (e) => {
+      setSttLogs(prev => [...prev.slice(-99), e.payload]);
+    });
+    const unlistenSttProgress = listen<any>('stt_install_progress', (e) => {
+      const p = e.payload || {};
+      const label = String(p.label || 'Downloading');
+      const downloaded = typeof p.downloaded_bytes === 'number' ? p.downloaded_bytes : 0;
+      const total = typeof p.total_bytes === 'number' ? p.total_bytes : null;
+      const percent = typeof p.percent === 'number' ? p.percent : null;
+      const mb = (n: number) => (n / (1024 * 1024)).toFixed(1);
+
+      if (total && percent !== null && total > 0) {
+        setSttProgress(`${label}: ${mb(downloaded)} / ${mb(total)} MB (${Math.round(percent)}%)`);
+      } else {
+        setSttProgress(`${label}: ${mb(downloaded)} MB`);
+      }
+    });
 
     return () => {
       unlistenProgress.then(f => f());
       unlistenLogs.then(f => f());
+      unlistenSttLogs.then(f => f());
+      unlistenSttProgress.then(f => f());
     };
   }, []);
 
@@ -93,6 +132,20 @@ export function FirstRunWizard({ workspacePath, provider, onComplete }: FirstRun
     } finally {
       setInstalling(false);
       setProgress(null);
+    }
+  };
+
+  const handleInstallStt = async () => {
+    setSttInstalling(true);
+    setSttLogs([]);
+    setSttProgress('');
+    try {
+      await invoke('install_whispercpp', { model: sttModel });
+      await checkStt();
+    } catch (err) {
+      setSttLogs(prev => [...prev, `ERROR: ${String(err)}`]);
+    } finally {
+      setSttInstalling(false);
     }
   };
 
@@ -138,6 +191,7 @@ export function FirstRunWizard({ workspacePath, provider, onComplete }: FirstRun
             <StatusItem label={`${provider} CLI`} passed={status.provider_cli_valid} detail={status.details.provider_cli?.version} />
             <StatusItem label="Workspace Dependencies" passed={status.workspace_deps_valid} />
             <StatusItem label="Remotion Skills" passed={status.skills_valid} />
+            <StatusItem label="Voice-to-Text (whisper.cpp) (Optional)" passed={Boolean(stt?.installed)} detail={stt?.model} />
           </div>
 
           {error && (
@@ -175,6 +229,58 @@ export function FirstRunWizard({ workspacePath, provider, onComplete }: FirstRun
               </div>
             </div>
           )}
+
+          {/* Optional STT installer */}
+          <div className="mt-8 p-4 bg-slate-950/40 border border-slate-800 rounded-xl">
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <div className="text-slate-200 font-bold">Voice-to-Text (Optional)</div>
+                <div className="text-xs text-slate-500 mt-1">
+                  Installs whisper.cpp + a small model for offline transcription (CPU-only).
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <select
+                  value={sttModel}
+                  onChange={(e) => setSttModel(e.target.value as any)}
+                  className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200"
+                  disabled={sttInstalling}
+                  title="Model"
+                >
+                  <option value="tiny">tiny (Multilingual, fastest)</option>
+                  <option value="tiny.en">tiny.en (English)</option>
+                  <option value="small">small (Multilingual)</option>
+                </select>
+                <button
+                  onClick={handleInstallStt}
+                  disabled={sttInstalling}
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 rounded-lg font-bold transition-colors flex items-center gap-2"
+                >
+                  {sttInstalling ? (
+                    <>
+                      <RefreshCw className="animate-spin w-4 h-4" />
+                      Installing...
+                    </>
+                  ) : (
+                    <>
+                      <Download className="w-4 h-4" />
+                      Install
+                    </>
+                  )}
+                </button>
+              </div>
+	            </div>
+	            {sttInstalling && sttProgress && (
+	              <div className="mt-3 text-xs text-slate-300 font-mono">{sttProgress}</div>
+	            )}
+	            {sttLogs.length > 0 && (
+	              <div className="mt-4 bg-slate-950 rounded-lg p-3 font-mono text-xs text-slate-400 max-h-28 overflow-y-auto border border-slate-800">
+	                {sttLogs.map((line, i) => (
+	                  <div key={i} className="whitespace-pre-wrap font-mono">{line}</div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Footer */}

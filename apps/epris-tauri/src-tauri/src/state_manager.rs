@@ -52,6 +52,9 @@ pub struct AppStateStore {
     pub projects: HashMap<String, ProjectState>,
 
     pub gemini_api_key: Option<String>,
+
+    pub stt_whisper_model: Option<String>,
+    pub stt_whisper_task: Option<String>,
 }
 
 pub struct StateManager {

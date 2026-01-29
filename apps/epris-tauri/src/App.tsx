@@ -5,6 +5,9 @@ import {
   Plus,
   Pencil,
   RefreshCw,
+  Mic,
+  Upload,
+  X,
   Save,
   Send,
   SlidersHorizontal,
@@ -12,8 +15,10 @@ import {
 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { openPath } from '@tauri-apps/plugin-opener';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { listen } from '@tauri-apps/api/event';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CreateProjectModal } from './components/CreateProjectModal';
+import { AssetsModal } from './components/AssetsModal';
 import { FirstRunWizard } from './components/FirstRunWizard';
 import { ParametersPanel } from './components/ParametersPanel';
 import { ProjectsPanel } from './components/ProjectsPanel';
@@ -27,12 +32,14 @@ import { useProjects } from './hooks/useProjects';
 import { usePrompt } from './hooks/usePrompt';
 import { useSnapshot } from './hooks/useSnapshot';
 import { useWaitPort } from './hooks/useWaitPort';
+import type { SttStatus } from './types/backend';
 
 function App() {
   const [promptInput, setPromptInput] = useState('');
   const [iframeKey, setIframeKey] = useState(0);
   const [showHistory, setShowHistory] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showAssets, setShowAssets] = useState(false);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [showWizard, setShowWizard] = useState(false);
   const [isEnvReady, setIsEnvReady] = useState(false);
@@ -53,6 +60,10 @@ function App() {
       return true;
     }
   });
+
+  const [sttStatus, setSttStatus] = useState<SttStatus | null>(null);
+  const [isRecording, setIsRecording] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
 
   // Provider State
   const [provider, setProvider] = useState('opencode');
@@ -85,9 +96,22 @@ function App() {
   } = useProjects();
   const workspacePath = activeProject?.path;
 
-  const { status: previewStatus, port } = usePreviewServer(workspacePath);
-  const { status: openCodeStatus } = useOpenCode(workspacePath);
-  const previewUrl = port ? `http://127.0.0.1:${port}` : null;
+  const micButtonRef = useRef<HTMLButtonElement | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const processorNodeRef = useRef<ScriptProcessorNode | null>(null);
+  const audioChunksRef = useRef<Float32Array[]>([]);
+  const audioSampleRateRef = useRef<number>(48000);
+
+  const {
+    status: previewStatus,
+    port,
+    error: previewError,
+    start: startPreview,
+  } = usePreviewServer(workspacePath, isEnvReady);
+  const { status: openCodeStatus } = useOpenCode(workspacePath, isEnvReady);
+  const previewUrl = previewStatus === 'running' && port ? `http://127.0.0.1:${port}` : null;
 
   const { waitPort } = useWaitPort();
   const reloadPreview = useCallback(async () => {
@@ -96,6 +120,12 @@ function App() {
     }
     setIframeKey((k) => k + 1);
   }, [previewUrl, waitPort]);
+
+  const previewLogPath = useMemo(() => {
+    if (!workspacePath) return '';
+    const sep = workspacePath.includes('\\') ? '\\' : '/';
+    return `${workspacePath}${sep}logs${sep}preview.log`;
+  }, [workspacePath]);
 
   const {
     status: promptStatus,
@@ -115,6 +145,214 @@ function App() {
     provider,
     model,
   );
+
+  // STT status
+  useEffect(() => {
+    const run = async () => {
+      try {
+        const s = await invoke<SttStatus>('get_stt_status');
+        setSttStatus(s);
+      } catch {
+        setSttStatus({ installed: false, binary_ok: false, model_ok: false });
+      }
+    };
+    void run();
+  }, [showWizard]);
+
+  // STT streaming events
+  useEffect(() => {
+    const unlistenChunk = listen<string>('stt_chunk', (event) => {
+      const text = String(event.payload || '').trim();
+      if (!text) return;
+      setPromptInput((prev) => (prev ? `${prev} ${text}` : text));
+    });
+    const unlistenLog = listen<string>('stt_log', (event) => {
+      const line = String(event.payload || '').trim();
+      if (line) console.log('[STT]', line);
+    });
+    return () => {
+      // React 18 StrictMode can mount/unmount effects quickly in dev; keep unlisten promises
+      // so we don't leak duplicate listeners.
+      void unlistenChunk.then((f) => f());
+      void unlistenLog.then((f) => f());
+    };
+  }, []);
+
+  const base64FromBytes = useCallback((bytes: Uint8Array) => {
+    let binary = '';
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+    }
+    return btoa(binary);
+  }, []);
+
+  const encodeWavPcm16 = useCallback((samples: Float32Array, sampleRate: number) => {
+    const buffer = new ArrayBuffer(44 + samples.length * 2);
+    const view = new DataView(buffer);
+
+    const writeString = (offset: number, s: string) => {
+      for (let i = 0; i < s.length; i++) view.setUint8(offset + i, s.charCodeAt(i));
+    };
+
+    writeString(0, 'RIFF');
+    view.setUint32(4, 36 + samples.length * 2, true);
+    writeString(8, 'WAVE');
+    writeString(12, 'fmt ');
+    view.setUint32(16, 16, true); // PCM chunk size
+    view.setUint16(20, 1, true); // PCM format
+    view.setUint16(22, 1, true); // mono
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true); // byte rate
+    view.setUint16(32, 2, true); // block align
+    view.setUint16(34, 16, true); // bits per sample
+    writeString(36, 'data');
+    view.setUint32(40, samples.length * 2, true);
+
+    let offset = 44;
+    for (let i = 0; i < samples.length; i++) {
+      const s = Math.max(-1, Math.min(1, samples[i]));
+      view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+      offset += 2;
+    }
+
+    return new Uint8Array(buffer);
+  }, []);
+
+  const trimSilence = useCallback((samples: Float32Array, sampleRate: number) => {
+    // Frame-based trimming: remove leading/trailing silence to speed up whisper.cpp.
+    // Uses average absolute amplitude per 10ms frame.
+    const frameSize = Math.max(1, Math.floor(sampleRate * 0.01)); // 10ms
+    const frameCount = Math.ceil(samples.length / frameSize);
+    if (frameCount <= 2) return samples;
+
+    const threshold = 0.01; // avg |amp|; tweakable
+    let startFrame = 0;
+    for (let f = 0; f < frameCount; f++) {
+      const start = f * frameSize;
+      const end = Math.min(samples.length, start + frameSize);
+      let sum = 0;
+      for (let i = start; i < end; i++) sum += Math.abs(samples[i]);
+      const avg = sum / Math.max(1, end - start);
+      if (avg > threshold) {
+        startFrame = f;
+        break;
+      }
+      if (f === frameCount - 1) return samples; // all silence (or too quiet)
+    }
+
+    let endFrame = frameCount - 1;
+    for (let f = frameCount - 1; f >= 0; f--) {
+      const start = f * frameSize;
+      const end = Math.min(samples.length, start + frameSize);
+      let sum = 0;
+      for (let i = start; i < end; i++) sum += Math.abs(samples[i]);
+      const avg = sum / Math.max(1, end - start);
+      if (avg > threshold) {
+        endFrame = f;
+        break;
+      }
+    }
+
+    const pad = Math.floor(sampleRate * 0.15); // 150ms padding
+    const start = Math.max(0, startFrame * frameSize - pad);
+    const end = Math.min(samples.length, (endFrame + 1) * frameSize + pad);
+
+    // Avoid trimming into an unusably short clip.
+    const minSamples = Math.floor(sampleRate * 0.2); // 200ms
+    if (end - start < minSamples) return samples;
+    return samples.subarray(start, end);
+  }, []);
+
+  const startRecording = useCallback(async () => {
+    if (!sttStatus?.installed) return;
+    if (isRecording || isTranscribing) return;
+
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const audioContext = new AudioContext();
+    const source = audioContext.createMediaStreamSource(stream);
+    const processor = audioContext.createScriptProcessor(4096, 1, 1);
+    const zeroGain = audioContext.createGain();
+    zeroGain.gain.value = 0;
+
+    audioChunksRef.current = [];
+    audioSampleRateRef.current = audioContext.sampleRate;
+
+    processor.onaudioprocess = (e) => {
+      const input = e.inputBuffer.getChannelData(0);
+      audioChunksRef.current.push(new Float32Array(input));
+    };
+
+    source.connect(processor);
+    processor.connect(zeroGain);
+    zeroGain.connect(audioContext.destination);
+
+    mediaStreamRef.current = stream;
+    audioContextRef.current = audioContext;
+    sourceNodeRef.current = source;
+    processorNodeRef.current = processor;
+
+    setIsRecording(true);
+  }, [isRecording, isTranscribing, sttStatus?.installed]);
+
+  const stopRecordingAndTranscribe = useCallback(async () => {
+    if (!workspacePath) return;
+    if (!isRecording) return;
+
+    setIsRecording(false);
+    setIsTranscribing(true);
+    try {
+      try {
+        processorNodeRef.current?.disconnect();
+      } catch {}
+      try {
+        sourceNodeRef.current?.disconnect();
+      } catch {}
+      try {
+        audioContextRef.current && (await audioContextRef.current.close());
+      } catch {}
+      try {
+        mediaStreamRef.current?.getTracks().forEach((t) => t.stop());
+      } catch {}
+
+      const chunks = audioChunksRef.current;
+      const total = chunks.reduce((acc, c) => acc + c.length, 0);
+      const merged = new Float32Array(total);
+      let off = 0;
+      for (const c of chunks) {
+        merged.set(c, off);
+        off += c.length;
+      }
+
+      const trimmed = trimSilence(merged, audioSampleRateRef.current);
+      const wavBytes = encodeWavPcm16(trimmed, audioSampleRateRef.current);
+      const wavBase64 = base64FromBytes(wavBytes);
+      await invoke('transcribe_whispercpp', { workspacePath, wavBase64 });
+    } catch (e) {
+      console.error('STT failed:', e);
+    } finally {
+      setIsTranscribing(false);
+      audioChunksRef.current = [];
+      mediaStreamRef.current = null;
+      audioContextRef.current = null;
+      sourceNodeRef.current = null;
+      processorNodeRef.current = null;
+    }
+  }, [base64FromBytes, encodeWavPcm16, isRecording, trimSilence, workspacePath]);
+
+  // Click anywhere else to stop recording.
+  useEffect(() => {
+    if (!isRecording) return;
+    const onDocClick = (e: MouseEvent) => {
+      const target = e.target as Node | null;
+      if (target && micButtonRef.current && micButtonRef.current.contains(target)) return;
+      void stopRecordingAndTranscribe();
+    };
+    document.addEventListener('mousedown', onDocClick, true);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick, true);
+    };
+  }, [isRecording, stopRecordingAndTranscribe]);
 
   const {
     status: exportStatus,
@@ -253,6 +491,18 @@ function App() {
     async (projectId: string) => {
       if (projectId === overview?.active_project_id) return;
       try {
+        if (workspacePath) {
+          await invoke('auto_save_checkpoint', {
+            workspacePath,
+            reason: 'Before switching project',
+            force: false,
+          });
+        }
+      } catch {}
+      try {
+        await invoke('stop_gate_validation');
+      } catch {}
+      try {
         await invoke('stop_preview_server');
       } catch {}
       try {
@@ -261,7 +511,7 @@ function App() {
       await setActiveProject(projectId);
       setIframeKey((k) => k + 1);
     },
-    [overview?.active_project_id, setActiveProject],
+    [overview?.active_project_id, setActiveProject, workspacePath],
   );
 
   const handleDeleteProject = useCallback(
@@ -277,6 +527,18 @@ function App() {
       }
 
       if (projectId === overview?.active_project_id) {
+        try {
+          if (workspacePath) {
+            await invoke('auto_save_checkpoint', {
+              workspacePath,
+              reason: 'Before deleting project',
+              force: true,
+            });
+          }
+        } catch {}
+        try {
+          await invoke('stop_gate_validation');
+        } catch {}
         try {
           await invoke('stop_preview_server');
         } catch {}
@@ -327,6 +589,47 @@ function App() {
   const isReady = Boolean(workspacePath) && previewStatus === 'running' && openCodeStatus === 'running' && isEnvReady;
   const isProcessing = promptStatus === 'sending';
   const hasGateError = promptStatus === 'error';
+  const gateFailed = Boolean(lastResponse?.gate_result && !lastResponse.gate_result.passed);
+
+  const handleFixGateError = useCallback(async () => {
+    if (!workspacePath || !lastResponse?.gate_result) return;
+    const err = lastResponse.gate_result.error_output || lastResponse.gate_result.error || 'Unknown gate error';
+    const fixPrompt =
+      `Fix the workspace so Gate passes.\n` +
+      `Only modify files inside src/** and public/**.\n` +
+      `Do not refactor unrelated code.\n\n` +
+      `Gate error output:\n${err}\n`;
+    setPromptInput(fixPrompt);
+    await sendPrompt(fixPrompt);
+  }, [lastResponse?.gate_result, sendPrompt, workspacePath]);
+
+  const handleSkipValidation = useCallback(async () => {
+    if (!workspacePath) return;
+    try {
+      await invoke('auto_save_checkpoint', {
+        workspacePath,
+        reason: 'Skip validation',
+        force: true,
+      });
+    } catch {}
+    try {
+      await invoke('stop_gate_validation');
+    } catch {}
+  }, [workspacePath]);
+
+  const handleCancelRun = useCallback(async () => {
+    if (!workspacePath) return;
+    try {
+      await invoke('auto_save_checkpoint', {
+        workspacePath,
+        reason: 'Cancel run',
+        force: true,
+      });
+    } catch {}
+    try {
+      await invoke('cancel_current_run');
+    } catch {}
+  }, [workspacePath]);
 
   return (
     <div className="flex flex-col h-screen bg-slate-900 text-slate-100 font-sans">
@@ -351,6 +654,52 @@ function App() {
           </div>
         </div>
         <div className="flex items-center gap-2">
+          {isProcessing && (
+            <div className="hidden lg:flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-800/40 border border-slate-700 text-slate-200 max-w-[720px]">
+              <RefreshCw size={16} className="animate-spin text-indigo-400 shrink-0" />
+              <div className="min-w-0 flex-1">
+                <div className="text-xs font-bold truncate">{promptCurrentStep || 'Working...'}</div>
+                <div className="w-full bg-slate-800 rounded-full h-1.5 mt-1 overflow-hidden border border-slate-700">
+                  <div
+                    className="bg-indigo-500 h-full transition-all duration-500 ease-out"
+                    style={{ width: `${promptProgress}%` }}
+                  />
+                </div>
+              </div>
+              <div className="text-[11px] text-slate-400 font-bold tabular-nums shrink-0">
+                {Math.round(promptProgress)}%
+              </div>
+              <span className="w-px h-6 bg-slate-700/70 mx-1" />
+              {String(promptCurrentStep || '').startsWith('Gate:') && (
+                <button
+                  onClick={handleSkipValidation}
+                  className="px-2 py-1 rounded-lg text-[11px] font-black uppercase tracking-widest bg-slate-900/50 border border-slate-700 hover:bg-slate-900 transition-colors"
+                  title="Stop validation checks and continue"
+                >
+                  Skip Checks
+                </button>
+              )}
+              <button
+                onClick={handleCancelRun}
+                className="p-1.5 rounded-lg hover:bg-red-500/10 text-slate-400 hover:text-red-300 transition-colors"
+                title="Cancel this run (stop AI + validation)"
+              >
+                <X size={14} />
+              </button>
+            </div>
+          )}
+
+          {gateFailed && !isProcessing && (
+            <button
+              onClick={handleFixGateError}
+              className="hidden lg:flex items-center gap-2 px-3 py-2 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-300 hover:bg-amber-500/15 transition-colors"
+              title="Send Gate error to AI and ask it to fix"
+            >
+              <span className="text-xs font-black uppercase tracking-widest">Gate Failed</span>
+              <span className="text-xs font-bold">Fix with AI</span>
+            </button>
+          )}
+
           <button
             onClick={handleManualSave}
             className="p-2 hover:bg-slate-800 rounded-lg transition-colors flex items-center gap-1 text-sm bg-indigo-600/20 text-indigo-400 border border-indigo-500/20"
@@ -418,6 +767,15 @@ function App() {
           </button>
 
           <button
+            onClick={() => setShowAssets(true)}
+            className="p-2 hover:bg-slate-800 rounded-lg transition-colors flex items-center gap-1 text-sm text-slate-400"
+            title="Project Assets"
+            disabled={!workspacePath}
+          >
+            <Upload size={18} />
+          </button>
+
+          <button
             onClick={() => setShowSettings(true)}
             className="p-2 hover:bg-slate-800 rounded-lg transition-colors flex items-center gap-1 text-sm text-slate-400"
             title="Settings"
@@ -468,7 +826,37 @@ function App() {
             <>
               {/* Preview Section */}
               <div className="flex-1 min-h-0 bg-slate-800/50 rounded-2xl border border-slate-700/50 shadow-2xl overflow-hidden relative group">
-                {previewUrl ? (
+                {previewStatus === 'error' ? (
+                  <div className="absolute inset-0 flex items-center justify-center text-slate-200">
+                    <div className="text-center max-w-lg px-6">
+                      <div className="text-lg font-bold mb-2">Preview failed to start</div>
+                      <div className="text-sm text-slate-400 mb-4 break-words">
+                        {previewError?.message || 'Unknown error'}
+                      </div>
+                      <div className="flex items-center justify-center gap-3">
+                        <button
+                          onClick={() => startPreview().catch(console.error)}
+                          className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-sm transition-colors"
+                        >
+                          Retry
+                        </button>
+                        {previewLogPath && (
+                          <button
+                            onClick={() => openPath(previewLogPath).catch(console.error)}
+                            className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 font-bold text-sm transition-colors"
+                          >
+                            Open preview.log
+                          </button>
+                        )}
+                      </div>
+                      {!isEnvReady && (
+                        <div className="text-xs text-slate-500 mt-4">
+                          If this is a new project, run the First Run Wizard to install workspace dependencies.
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ) : previewUrl ? (
                   <iframe
                     key={iframeKey}
                     src={`${previewUrl}?t=${iframeKey}`}
@@ -484,26 +872,7 @@ function App() {
                   </div>
                 )}
 
-                {/* Processing Overlay */}
-                {isProcessing && (
-                  <div className="absolute inset-0 bg-slate-900/80 flex items-center justify-center z-30">
-                    <div className="text-center w-full max-w-md px-10">
-                      <RefreshCw size={48} className="animate-spin mx-auto mb-6 text-indigo-400" />
-                      <div className="text-xl font-semibold text-white mb-2">
-                        {promptCurrentStep || 'Generating Animation...'}
-                      </div>
-                      <div className="w-full bg-slate-800 rounded-full h-2 mb-4 overflow-hidden border border-slate-700">
-                        <div
-                          className="bg-indigo-500 h-full transition-all duration-500 ease-out"
-                          style={{ width: `${promptProgress}%` }}
-                        />
-                      </div>
-                      <div className="text-xs text-slate-500 uppercase tracking-widest font-bold tracking-widest">
-                        {Math.round(promptProgress)}% Complete
-                      </div>
-                    </div>
-                  </div>
-                )}
+                {/* Progress moved to header */}
               </div>
 
               {/* Input Section */}
@@ -578,10 +947,45 @@ function App() {
                       value={promptInput}
                       onChange={(e) => setPromptInput(e.target.value)}
                       placeholder={isReady ? 'Describe animation...' : 'Waiting services...'}
-                      className="w-full bg-slate-800 border-2 border-slate-700 rounded-2xl px-6 py-4 pr-16 text-lg focus:outline-none focus:border-indigo-500 transition-all placeholder:text-slate-500 shadow-xl disabled:opacity-50"
+                      className="w-full bg-slate-800 border-2 border-slate-700 rounded-2xl px-6 py-4 pr-28 text-lg focus:outline-none focus:border-indigo-500 transition-all placeholder:text-slate-500 shadow-xl disabled:opacity-50"
                       onKeyDown={(e) => e.key === 'Enter' && !isProcessing && handleSubmit()}
-                      disabled={!isReady || isProcessing}
+                      disabled={!isReady}
                     />
+                    <button
+                      ref={micButtonRef}
+                      className={`absolute right-14 top-1/2 -translate-y-1/2 p-3 rounded-xl transition-all shadow-lg active:scale-95 disabled:opacity-50 disabled:active:scale-100 ${
+                        isRecording
+                          ? 'bg-red-600 hover:bg-red-500 text-white'
+                          : isTranscribing
+                            ? 'bg-amber-600 hover:bg-amber-500 text-white'
+                            : 'bg-slate-700 hover:bg-slate-600 text-slate-100'
+                      }`}
+                      disabled={!isReady || !sttStatus?.installed}
+                      title={
+                        !sttStatus?.installed
+                          ? 'Voice-to-text is not installed (run First Run Wizard)'
+                          : isRecording
+                            ? 'Recording... click anywhere to stop'
+                            : isTranscribing
+                              ? 'Transcribing...'
+                              : 'Voice-to-text'
+                      }
+                      onClick={async () => {
+                        if (isTranscribing) {
+                          try {
+                            await invoke('cancel_stt');
+                          } catch {}
+                          return;
+                        }
+                        if (isRecording) {
+                          await stopRecordingAndTranscribe();
+                          return;
+                        }
+                        await startRecording();
+                      }}
+                    >
+                      <Mic size={20} />
+                    </button>
                     <button
                       className="absolute right-3 top-1/2 -translate-y-1/2 p-3 bg-indigo-600 hover:bg-indigo-500 rounded-xl transition-all shadow-lg active:scale-95 text-white disabled:opacity-50 disabled:active:scale-100"
                       disabled={!promptInput.trim() || !isReady || isProcessing}
@@ -648,6 +1052,11 @@ function App() {
       {/* Settings Modal */}
       {showSettings && (
         <Settings onClose={() => setShowSettings(false)} currentProvider={provider} onProviderChange={handleProviderChange} />
+      )}
+
+      {/* Assets Modal */}
+      {showAssets && workspacePath && (
+        <AssetsModal workspacePath={workspacePath} previewUrl={previewUrl || undefined} onClose={() => setShowAssets(false)} />
       )}
 
       {/* First Run Wizard */}

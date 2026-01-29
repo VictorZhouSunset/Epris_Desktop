@@ -3,10 +3,13 @@ use std::path::Path;
 use std::io::Write;
 use std::process::Child;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use crate::utils;
 use crate::snapshot;
-use crate::gate::{self, GateResult};
+use crate::gate::{self, GateMode, GateResult};
 use tauri::{Manager, Emitter};
+
+static PROMPT_CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Serialize)]
 struct PromptProgress {
@@ -46,6 +49,23 @@ pub struct PromptResponse {
     pub message: String,
     pub gate_result: Option<GateResult>,
     pub snapshot_id: Option<String>,
+    #[serde(default)]
+    pub canceled: bool,
+    #[serde(default)]
+    pub validation_skipped: bool,
+}
+
+#[tauri::command]
+pub fn cancel_current_run(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, Mutex<OpenCodeState>>,
+) -> Result<(), String> {
+    PROMPT_CANCEL_REQUESTED.store(true, Ordering::SeqCst);
+    let _ = gate::stop_gate_validation();
+    let _ = crate::provider::stop_provider_cli();
+    let _ = stop_opencode(state);
+    let _ = app_handle.emit("prompt-progress", PromptProgress { percent: 0.0, step: "Canceled".into() });
+    Ok(())
 }
 
 #[tauri::command]
@@ -92,6 +112,9 @@ pub async fn send_prompt(
     model: String,
     app_handle: tauri::AppHandle,
 ) -> Result<PromptResponse, String> {
+    PROMPT_CANCEL_REQUESTED.store(false, Ordering::SeqCst);
+    let canceled = || PROMPT_CANCEL_REQUESTED.load(Ordering::SeqCst);
+
     // If provider is Gemini, route exclusively to run_provider_cli
     if provider == "gemini" {
         let app_data_dir = app_handle.path().app_local_data_dir().map_err(|e| e.to_string())?;
@@ -105,13 +128,26 @@ pub async fn send_prompt(
         let _ = app_handle.emit("prompt-progress", PromptProgress { percent: 20.0, step: "AI Generating Animation Code".into() });
         println!("[Epris] Step 2/5: Running Gemini CLI...");
         let start = std::time::Instant::now();
-        crate::provider::run_provider_cli(
+        let cli_res = crate::provider::run_provider_cli(
             &workspace_path, 
             "gemini", 
             &prompt, 
             Some(model.clone()), 
             app_data_dir
-        ).await?;
+        ).await;
+        if let Err(e) = cli_res {
+            if canceled() || e == "Canceled" {
+                return Ok(PromptResponse {
+                    success: false,
+                    message: "Canceled".into(),
+                    gate_result: None,
+                    snapshot_id: None,
+                    canceled: true,
+                    validation_skipped: false,
+                });
+            }
+            return Err(e);
+        }
         let duration = start.elapsed().as_secs_f64();
         
         // Log performance
@@ -120,7 +156,17 @@ pub async fn send_prompt(
         // Step 3: Wait
         let _ = app_handle.emit("prompt-progress", PromptProgress { percent: 75.0, step: "Waiting for file system to settle".into() });
         println!("[Epris] Step 3/5: Waiting for file system...");
-        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        if canceled() {
+            return Ok(PromptResponse {
+                success: false,
+                message: "Canceled".into(),
+                gate_result: None,
+                snapshot_id: None,
+                canceled: true,
+                validation_skipped: false,
+            });
+        }
 
         // Step 4: Security Check
         let _ = app_handle.emit("prompt-progress", PromptProgress { percent: 85.0, step: "Running security checks".into() });
@@ -138,24 +184,45 @@ pub async fn send_prompt(
                 message: format!("🔒 Security violation: Files protected. Reverted."),
                 gate_result: None,
                 snapshot_id: None,
+                canceled: false,
+                validation_skipped: false,
             });
         }
 
         // Step 5: Gate
         let _ = app_handle.emit("prompt-progress", PromptProgress { percent: 95.0, step: "Validating animation integrity".into() });
         println!("[Epris] Step 5/5: Entering Gate Validation loop...");
-        // Gemini doesn't have session_id concept exposed yet easily, maybe pass "gemini" as session
-        let gate_result = gate_loop(workspace_path.clone(), "gemini-session".into(), 1, 0, provider.clone(), model.clone()).await?; 
-        
-        let parent_id = snapshot::get_dag_head(workspace_path.clone())?;
-        let snapshot_id = snapshot::auto_save_snapshot(workspace_path.clone(), prompt.clone(), parent_id, "gemini".into())?;
-        snapshot::update_dag_snapshot_gate_result(workspace_path.clone(), snapshot_id.clone(), gate_result.clone())?;
+        let parent_id = snapshot::get_dag_head(workspace_path.clone()).unwrap_or_else(|_| "root".into());
+        let draft_snapshot_id = snapshot::auto_save_snapshot(
+            workspace_path.clone(),
+            prompt.clone(),
+            parent_id,
+            "gemini".into(),
+        )
+        .ok();
+
+        let gate_result = gate_loop(workspace_path.clone(), app_handle.clone()).await?;
+        if gate_result.error_output == "Gate canceled" && canceled() {
+            return Ok(PromptResponse {
+                success: false,
+                message: "Canceled".into(),
+                gate_result: None,
+                snapshot_id: draft_snapshot_id,
+                canceled: true,
+                validation_skipped: false,
+            });
+        }
+        if let Some(id) = draft_snapshot_id.clone() {
+            let _ = snapshot::update_dag_snapshot_gate_result(workspace_path.clone(), id, gate_result.clone());
+        }
 
         return Ok(PromptResponse {
             success: gate_result.passed,
             message: "Gemini task completed".into(),
             gate_result: Some(gate_result),
-            snapshot_id: Some(snapshot_id),
+            snapshot_id: draft_snapshot_id,
+            canceled: false,
+            validation_skipped: false,
         });
     }
 
@@ -168,6 +235,16 @@ pub async fn send_prompt(
     
     let client = reqwest::Client::new();
     let base_url = format!("http://127.0.0.1:{}", port);
+    if canceled() {
+        return Ok(PromptResponse {
+            success: false,
+            message: "Canceled".into(),
+            gate_result: None,
+            snapshot_id: None,
+            canceled: true,
+            validation_skipped: false,
+        });
+    }
 
     // Resolve a valid OpenCode providerID/modelID pair.
     // The UI currently treats "provider" as the app-level provider selector ("opencode" | "gemini")
@@ -178,13 +255,28 @@ pub async fn send_prompt(
     let sid = match session_id {
         Some(id) => id,
         None => {
-            let res = client.post(format!("{}/session", base_url))
+            let res = match client.post(format!("{}/session", base_url))
                 .json(&serde_json::json!({
                     "title": "Epris Remotion"
                 }))
                 .send()
                 .await
-                .map_err(|e| format!("Failed to create session: {}", e))?;
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    if canceled() {
+                        return Ok(PromptResponse {
+                            success: false,
+                            message: "Canceled".into(),
+                            gate_result: None,
+                            snapshot_id: None,
+                            canceled: true,
+                            validation_skipped: false,
+                        });
+                    }
+                    return Err(format!("Failed to create session: {}", e));
+                }
+            };
             
             let body: serde_json::Value = res.json().await.map_err(|e| format!("Failed to parse session response: {}", e))?;
             let new_id = body["id"].as_str().ok_or("OpenCode response missing id")?.to_string();
@@ -215,7 +307,7 @@ pub async fn send_prompt(
         workspace_path
     );
 
-    let res = client.post(format!("{}/session/{}/message", base_url, sid))
+    let res = match client.post(format!("{}/session/{}/message", base_url, sid))
         .json(&serde_json::json!({
             "model": { "providerID": provider_id, "modelID": model_id },
             "system": system_prompt,
@@ -224,7 +316,22 @@ pub async fn send_prompt(
         }))
         .send()
         .await
-        .map_err(|e| format!("Failed to send prompt: {}", e))?;
+    {
+        Ok(r) => r,
+        Err(e) => {
+            if canceled() {
+                return Ok(PromptResponse {
+                    success: false,
+                    message: "Canceled".into(),
+                    gate_result: None,
+                    snapshot_id: None,
+                    canceled: true,
+                    validation_skipped: false,
+                });
+            }
+            return Err(format!("Failed to send prompt: {}", e));
+        }
+    };
     
     let body: serde_json::Value = res.json().await.map_err(|e| format!("Failed to parse response JSON: {}", e))?;
     let duration = prompt_start.elapsed().as_secs_f64();
@@ -243,7 +350,7 @@ pub async fn send_prompt(
     
     println!("[Epris] Step 3/5: Waiting 3s for file system to settle...");
     let _ = app_handle.emit("prompt-progress", PromptProgress { percent: 75.0, step: "Waiting for file system to settle".into() });
-    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
     println!("[Epris] Step 4/5: Running security check...");
     let _ = app_handle.emit("prompt-progress", PromptProgress { percent: 85.0, step: "Running security checks".into() });
@@ -276,20 +383,49 @@ pub async fn send_prompt(
             message: format!("🔒 Security violation: AI attempted to modify protected files: {}. Changes reverted.", forbidden_files.join(", ")),
             gate_result: None,
             snapshot_id: None,
+            canceled: false,
+            validation_skipped: false,
         });
     }
 
+    let draft_snapshot_id = snapshot::auto_save_snapshot(workspace_path.clone(), prompt.clone(), parent_id, sid.clone()).ok();
+
     println!("[Epris] Step 5/5: Entering Gate Validation loop...");
     let _ = app_handle.emit("prompt-progress", PromptProgress { percent: 95.0, step: "Validating animation integrity".into() });
-    let gate_result = gate_loop(workspace_path.clone(), sid.clone(), 2, port, provider.clone(), model.clone()).await?;
-    let snapshot_id = snapshot::auto_save_snapshot(workspace_path.clone(), prompt.clone(), parent_id, sid.clone())?;
-    snapshot::update_dag_snapshot_gate_result(workspace_path.clone(), snapshot_id.clone(), gate_result.clone())?;
+    let gate_result = gate_loop(workspace_path.clone(), app_handle.clone()).await?;
+
+    if gate_result.error_output == "Gate canceled" {
+        if canceled() {
+            return Ok(PromptResponse {
+                success: false,
+                message: "Canceled".into(),
+                gate_result: None,
+                snapshot_id: draft_snapshot_id,
+                canceled: true,
+                validation_skipped: false,
+            });
+        }
+        return Ok(PromptResponse {
+            success: true,
+            message: "Validation skipped".into(),
+            gate_result: None,
+            snapshot_id: draft_snapshot_id,
+            canceled: false,
+            validation_skipped: true,
+        });
+    }
+
+    if let Some(id) = draft_snapshot_id.clone() {
+        let _ = snapshot::update_dag_snapshot_gate_result(workspace_path.clone(), id, gate_result.clone());
+    }
 
     Ok(PromptResponse {
         success: gate_result.passed,
         message: message_text.to_string(),
         gate_result: Some(gate_result),
-        snapshot_id: Some(snapshot_id),
+        snapshot_id: draft_snapshot_id,
+        canceled: false,
+        validation_skipped: false,
     })
 }
 
@@ -465,6 +601,7 @@ pub fn clear_session(state: tauri::State<'_, Mutex<OpenCodeState>>) -> Result<()
     Ok(())
 }
 
+#[allow(dead_code)]
 async fn request_fix(
     port: u16,
     session_id: String,
@@ -497,26 +634,12 @@ async fn request_fix(
 
 async fn gate_loop(
     workspace_path: String,
-    session_id: String,
-    max_retries: i32,
-    port: u16,
-    provider: String,
-    model: String,
+    app_handle: tauri::AppHandle,
 ) -> Result<GateResult, String> {
-    let mut attempts = 0;
-    
-    loop {
-        attempts += 1;
-        let mut result = gate::run_gate(workspace_path.clone()).await?;
-        result.attempts = attempts;
-        
-        if result.success || attempts > max_retries {
-            return Ok(result);
-        }
-        
-        request_fix(port, session_id.clone(), &result, provider.clone(), model.clone()).await?;
-        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-    }
+    // Human-in-the-loop: run Gate once and surface errors to the user.
+    let mut result = gate::run_gate_with_mode(workspace_path.clone(), GateMode::Balanced, Some(&app_handle)).await?;
+    result.attempts = 1;
+    Ok(result)
 }
 
 pub fn log_security_violation(

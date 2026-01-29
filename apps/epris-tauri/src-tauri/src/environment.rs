@@ -94,14 +94,13 @@ impl EnvironmentManager {
             let g_exists = has_any_skill_md(&gemini_skills_dir);
             let o_exists = has_any_skill_md(&opencode_skills_dir);
 
-            println!("[Epris] Checking skills at:");
-            println!("  Gemini dir: {:?} (Has SKILL.md: {})", gemini_skills_dir, g_exists);
-            println!("  OpenCode dir: {:?} (Has SKILL.md: {})", opencode_skills_dir, o_exists);
-
             // Step-11 policy: install projections for both providers
             if g_exists && o_exists {
                 status.skills_valid = true;
             } else {
+                println!("[Epris] Missing skills:");
+                println!("  Gemini dir: {:?} (Has SKILL.md: {})", gemini_skills_dir, g_exists);
+                println!("  OpenCode dir: {:?} (Has SKILL.md: {})", opencode_skills_dir, o_exists);
                 status.missing.push("skills".into());
             }
         }

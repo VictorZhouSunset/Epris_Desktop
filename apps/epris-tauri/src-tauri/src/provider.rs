@@ -4,9 +4,49 @@ use std::path::{PathBuf};
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use tauri::Manager;
 use crate::environment::EnvironmentManager;
 use crate::utils;
+
+static PROVIDER_CLI_CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
+static PROVIDER_CLI_PID: AtomicU32 = AtomicU32::new(0);
+
+fn kill_pid_tree(pid: u32) {
+    if pid == 0 {
+        return;
+    }
+    println!("[Epris] Killing provider CLI process tree for PID: {}", pid);
+
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .status();
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .status();
+    }
+}
+
+pub fn cancel_provider_cli() {
+    PROVIDER_CLI_CANCEL_REQUESTED.store(true, Ordering::SeqCst);
+    let pid = PROVIDER_CLI_PID.swap(0, Ordering::SeqCst);
+    if pid != 0 {
+        kill_pid_tree(pid);
+    }
+}
+
+#[tauri::command]
+pub fn stop_provider_cli() -> Result<(), String> {
+    cancel_provider_cli();
+    Ok(())
+}
 
 pub struct ProviderState {
     pub process: Option<Child>,
@@ -224,6 +264,9 @@ pub async fn run_provider_cli(
     model_id: Option<String>,
     app_data_dir: PathBuf,
 ) -> Result<(), String> {
+    PROVIDER_CLI_CANCEL_REQUESTED.store(false, Ordering::SeqCst);
+    PROVIDER_CLI_PID.store(0, Ordering::SeqCst);
+
     let env_manager = EnvironmentManager::new(app_data_dir.clone());
     let bin_dir = env_manager.get_bin_dir();
     let path_env = std::env::var("PATH").unwrap_or_default();
@@ -275,8 +318,20 @@ pub async fn run_provider_cli(
         cmd.stderr(file);
     }
 
-    let status = cmd.status().map_err(|e| format!("Failed to run CLI provider: {}", e))?;
+    if PROVIDER_CLI_CANCEL_REQUESTED.load(Ordering::SeqCst) {
+        return Err("Canceled".to_string());
+    }
+
+    let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn CLI provider: {}", e))?;
+    PROVIDER_CLI_PID.store(child.id(), Ordering::SeqCst);
+
+    let status = child.wait().map_err(|e| format!("Failed to wait CLI provider: {}", e))?;
+    PROVIDER_CLI_PID.store(0, Ordering::SeqCst);
+
     if !status.success() {
+        if PROVIDER_CLI_CANCEL_REQUESTED.load(Ordering::SeqCst) {
+            return Err("Canceled".to_string());
+        }
         return Err(format!("CLI provider {} failed with exit code {:?}", provider_name, status.code()));
     }
 

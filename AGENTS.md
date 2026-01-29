@@ -13,11 +13,12 @@ The previous implementation plan of this project (which is the V0 stage) is: doc
 and: docs\step_11_gemini_cli_open_code_provider_first_run_wizard_remotion_skills_spec.md
 You should read these documents carefully and research into the project's current state before starting to work on it. If you find any discrepancies or errors, please **notify me first** before proceeding.
 
-When I worked on this project earlier, I made some mistakes and used bad git practices which makes the project a mess so we are now on a separate branch 'recovery/baseline' to fix the mess. The implementation of step 1-10 should be fine but step 11 has a lot of issues.
-
 I have put the two main references for step 11 in your skills: gemini-cli and opencode-server, these two give you a basic idea of how to integrate these two CLI into Epris.
 
 # Modern Full-Stack Development Guidelines
+
+**Key Notice**: You are working in a WSL sandbox, so some "pnpm" operation will be in conflict with my "pnpm" in Windows, such as pnpm i, pnpm reinstall, node-gyp, etc. Try not to do these by yourself, ask me to do it on Windows side.
+I write a script in scripts folder (bootstrap-wsl.sh), running it should give you ability to run cargo tests.
 
 You **can** deviate from the requirements below (especially when you are explicitly asked to use the framework other than those listed below), but if you do so, you **must** provide detailed explanation and **seek approval or confirmation before** you execute on these.
 

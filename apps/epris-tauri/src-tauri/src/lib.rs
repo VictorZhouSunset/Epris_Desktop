@@ -7,6 +7,8 @@ mod snapshot;
 mod export;
 mod video_config;
 mod utils;
+mod assets;
+mod stt;
 
 use std::sync::Mutex;
 use tauri::Manager;
@@ -23,6 +25,22 @@ pub mod provider;
 use crate::state_manager::{StateManager, AppStateStore};
 use crate::environment::{EnvironmentManager, EnvironmentStatus};
 // Duplicate Manager import removed
+
+fn auto_save_active_project_checkpoint(app_handle: &tauri::AppHandle, reason: &str) {
+    let app_dir = match app_handle.path().app_local_data_dir() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let state_mgr = StateManager::new(app_dir);
+    let state = state_mgr.read();
+    let Some(active_id) = state.active_project_id else {
+        return;
+    };
+    let Some(p) = state.projects.get(&active_id) else {
+        return;
+    };
+    snapshot::auto_save_checkpoint_best_effort(&p.path, reason);
+}
 
 
 // ============================================================================
@@ -65,6 +83,9 @@ fn greet(name: &str) -> String {
 
 pub fn trigger_cleanup(app_handle: &tauri::AppHandle) {
     println!("[Epris] Initializing process cleanup...");
+
+    // Save a best-effort checkpoint so users can recover from partial runs.
+    auto_save_active_project_checkpoint(app_handle, "App exit");
     
     // Clean up Preview Server
     if let Ok(mut server) = app_handle.state::<Mutex<preview::PreviewServerState>>().lock() {
@@ -79,6 +100,9 @@ pub fn trigger_cleanup(app_handle: &tauri::AppHandle) {
             utils::kill_process_tree(&mut child);
         }
     }
+
+    // Clean up Gate validation (pnpm processes)
+    let _ = gate::stop_gate_validation();
     
     // Specialized port based cleanup
     #[cfg(target_os = "windows")]
@@ -159,14 +183,17 @@ pub fn run() {
             // opencode::stop_opencode, // Use provider::stop_opencode logic or similar? provider.rs has duplicates. 
             // Stick to opencode::stop_opencode for now as duplicates were removed from provider.rs
             opencode::stop_opencode, 
+            opencode::cancel_current_run,
             opencode::send_prompt,
             opencode::clear_session,
             gate::run_gate,
+            gate::stop_gate_validation,
             export::export_video,
             snapshot::delete_snapshot_tree,
             snapshot::get_dag_head,
             snapshot::save_dag_head,
             snapshot::auto_save_snapshot,
+            snapshot::auto_save_checkpoint,
             snapshot::manual_save_snapshot,
             snapshot::checkout_snapshot,
             snapshot::get_snapshot_dag,
@@ -184,6 +211,17 @@ pub fn run() {
             environment::open_gemini_login,
             environment::set_gemini_api_key,
             environment::open_gemini_auth_terminal,
+            provider::stop_provider_cli,
+            assets::list_assets,
+            assets::upload_asset,
+            assets::delete_asset,
+            assets::rename_asset,
+            stt::get_stt_status,
+            stt::install_whispercpp,
+            stt::transcribe_whispercpp,
+            stt::set_stt_model,
+            stt::set_stt_task,
+            stt::cancel_stt,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

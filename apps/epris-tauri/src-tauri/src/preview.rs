@@ -33,6 +33,11 @@ pub fn start_preview_server(
     let port = utils::find_available_port(3030);
     println!("[Epris] Starting preview server in {} on port {}", workspace_path, port);
 
+    let node_modules = std::path::Path::new(&workspace_path).join("node_modules");
+    if !node_modules.exists() {
+        return Err("Workspace dependencies are missing (node_modules not found). Run the First Run Wizard / pnpm install for this project first.".to_string());
+    }
+
     let logs_dir = std::path::Path::new(&workspace_path).join("logs");
     let _ = std::fs::create_dir_all(&logs_dir);
     let log_path = logs_dir.join("preview.log");
@@ -43,6 +48,8 @@ pub fn start_preview_server(
         .map_err(|e| format!("Failed to open preview.log: {}", e))?;
     let _ = writeln!(log_file, "\n--- Preview Server Log [{}] ---", chrono::Utc::now());
 
+    // Pass args through to the underlying dev script (Vite expects `--port`).
+    // Note: `pnpm run <script> --port <n>` forwards args to the script. (`--` is NOT stripped by pnpm.)
     let mut cmd = utils::create_shell_command("pnpm", &["run", "dev", "--port", &port.to_string()]);
     cmd.current_dir(&workspace_path);
     cmd.stdout(Stdio::from(log_file.try_clone().map_err(|e| e.to_string())?));

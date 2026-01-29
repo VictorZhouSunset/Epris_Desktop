@@ -918,9 +918,11 @@ dependencies = [
 name = "epris-tauri"
 version = "0.1.0"
 dependencies = [
+ "base64 0.21.7",
  "chrono",
  "ctrlc",
  "fs_extra",
+ "futures-util",
  "open",
  "reqwest 0.11.27",
  "serde",
@@ -3225,10 +3227,12 @@ dependencies = [
  "system-configuration",
  "tokio",
  "tokio-native-tls",
+ "tokio-util",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm-streams",
  "web-sys",
  "winreg 0.50.0",
 ]

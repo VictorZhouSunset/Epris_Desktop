@@ -27,6 +27,18 @@ export function useSnapshot(workspacePath: string | undefined, onCheckoutCallbac
     if (!workspacePath) return;
     setLoading(true);
     try {
+      try {
+        await IpcService.call<void>('AUTO_SAVE_CHECKPOINT', {
+          workspacePath,
+          reason: 'Before restore snapshot',
+        });
+      } catch {}
+      try {
+        await IpcService.call<void>('CANCEL_CURRENT_RUN');
+      } catch {}
+      try {
+        await IpcService.call<void>('STOP_GATE_VALIDATION');
+      } catch {}
       await IpcService.call<void>('CHECKOUT_SNAPSHOT', {
         workspacePath,
         snapshotId,

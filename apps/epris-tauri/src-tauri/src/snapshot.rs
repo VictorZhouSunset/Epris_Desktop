@@ -36,6 +36,50 @@ pub struct Edge {
     pub to: String,
 }
 
+fn auto_save_checkpoint_internal(
+    workspace_path: &str,
+    reason: &str,
+    force: bool,
+) -> Result<Option<String>, String> {
+    let dirty = check_unsaved_changes(workspace_path.to_string()).unwrap_or(false);
+    if !force && !dirty {
+        return Ok(None);
+    }
+
+    let parent_id = get_dag_head(workspace_path.to_string()).unwrap_or_else(|_| "root".to_string());
+    let sid = Uuid::new_v4().to_string();
+    let name = format!("Auto: {}", reason);
+
+    let snapshot_meta = SnapshotMetadata {
+        id: sid,
+        name,
+        description: reason.to_string(),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        parent_id: Some(parent_id),
+        is_manual: true,
+        prompt: None,
+        session_id: String::new(),
+        gate_result: None,
+    };
+
+    let snapshot_id = create_snapshot_with_metadata(workspace_path.to_string(), snapshot_meta)?;
+    save_dag_head(workspace_path.to_string(), snapshot_id.clone())?;
+    Ok(Some(snapshot_id))
+}
+
+#[tauri::command]
+pub fn auto_save_checkpoint(
+    workspace_path: String,
+    reason: String,
+    force: Option<bool>,
+) -> Result<Option<String>, String> {
+    auto_save_checkpoint_internal(&workspace_path, &reason, force.unwrap_or(false))
+}
+
+pub fn auto_save_checkpoint_best_effort(workspace_path: &str, reason: &str) {
+    let _ = auto_save_checkpoint_internal(workspace_path, reason, false);
+}
+
 pub fn create_snapshot_with_metadata(
     workspace_path: String,
     snapshot_meta: SnapshotMetadata,

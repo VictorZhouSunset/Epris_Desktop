@@ -1,7 +1,58 @@
 use serde::{Serialize, Deserialize};
 use std::path::Path;
 use std::io::Write;
+use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use crate::utils;
+use tauri::Emitter;
+
+static GATE_CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
+static GATE_CURRENT_PID: AtomicU32 = AtomicU32::new(0);
+
+fn kill_pid_tree(pid: u32) {
+    if pid == 0 {
+        return;
+    }
+    println!("[Epris] Killing Gate process tree for PID: {}", pid);
+
+    #[cfg(target_os = "windows")]
+    {
+        // On Windows, use taskkill to kill the entire process tree (/T)
+        #[cfg(target_os = "windows")]
+        use std::os::windows::process::CommandExt;
+
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .status();
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Best-effort: send SIGKILL
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .status();
+    }
+}
+
+#[tauri::command]
+pub fn stop_gate_validation() -> Result<(), String> {
+    GATE_CANCEL_REQUESTED.store(true, Ordering::SeqCst);
+    let pid = GATE_CURRENT_PID.swap(0, Ordering::SeqCst);
+    if pid != 0 {
+        kill_pid_tree(pid);
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+pub enum GateMode {
+    Strict,
+    Balanced,
+    Fast,
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct GateResult {
@@ -25,7 +76,28 @@ pub struct GateResult {
 
 #[tauri::command]
 pub async fn run_gate(workspace_path: String) -> Result<GateResult, String> {
+    // Default command behavior stays strict.
+    run_gate_with_mode(workspace_path, GateMode::Strict, None).await
+}
+
+pub async fn run_gate_with_mode(
+    workspace_path: String,
+    mode: GateMode,
+    app_handle: Option<&tauri::AppHandle>,
+) -> Result<GateResult, String> {
+    // New run: clear any previous cancel request.
+    GATE_CANCEL_REQUESTED.store(false, Ordering::SeqCst);
+    GATE_CURRENT_PID.store(0, Ordering::SeqCst);
+
     println!("[Epris] Running Gate validation for {}", workspace_path);
+    println!(
+        "[Epris] Gate mode: {}",
+        match mode {
+            GateMode::Strict => "strict (typecheck + smoke:0 + smoke:mid)",
+            GateMode::Balanced => "balanced (typecheck + smoke:mid)",
+            GateMode::Fast => "fast (typecheck only)",
+        }
+    );
     let gate_start = std::time::Instant::now();
     
     let mut result = GateResult {
@@ -45,14 +117,57 @@ pub async fn run_gate(workspace_path: String) -> Result<GateResult, String> {
         duration_smoke_mid_sec: 0.0,
         total_duration_sec: 0.0,
     };
+
+    let canceled = || GATE_CANCEL_REQUESTED.load(Ordering::SeqCst);
+    let set_progress = |percent: f64, step: &str| {
+        if let Some(h) = app_handle {
+            let _ = h.emit(
+                "prompt-progress",
+                serde_json::json!({ "percent": percent, "step": step }),
+            );
+        }
+    };
+
+    let run_step = |args: &[&str]| -> Result<std::process::Output, String> {
+        if canceled() {
+            return Err("Gate canceled".to_string());
+        }
+
+        let child = utils::create_shell_command("pnpm", args)
+            .current_dir(&workspace_path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to spawn pnpm {:?}: {}", args, e))?;
+
+        let pid = child.id();
+        GATE_CURRENT_PID.store(pid, Ordering::SeqCst);
+
+        let out = child
+            .wait_with_output()
+            .map_err(|e| format!("Failed to wait pnpm {:?}: {}", args, e))?;
+
+        GATE_CURRENT_PID.store(0, Ordering::SeqCst);
+        if canceled() {
+            return Err("Gate canceled".to_string());
+        }
+        Ok(out)
+    };
     
     // Step 1: Typecheck
+    set_progress(96.0, "Gate: Typecheck");
     println!("[Epris] Gate Step 1/3: Running typecheck...");
     let typecheck_start = std::time::Instant::now();
-    let typecheck_output = utils::create_shell_command("pnpm", &["run", "typecheck"])
-        .current_dir(&workspace_path)
-        .output()
-        .map_err(|e| format!("Failed to run typecheck: {}", e))?;
+    let typecheck_output = match run_step(&["run", "typecheck"]) {
+        Ok(o) => o,
+        Err(e) => {
+            result.error_output = e.clone();
+            result.error = Some(e);
+            result.total_duration_sec = gate_start.elapsed().as_secs_f64();
+            log_gate_result(&workspace_path, &result);
+            return Ok(result);
+        }
+    };
     result.duration_typecheck_sec = typecheck_start.elapsed().as_secs_f64();
     println!("[Epris] Typecheck finished in {:.2}s", result.duration_typecheck_sec);
     
@@ -69,38 +184,63 @@ pub async fn run_gate(workspace_path: String) -> Result<GateResult, String> {
     }
     result.typecheck_passed = true;
     result.typecheck = true;
-    
-    // Step 2: Smoke test frame 0
-    println!("[Epris] Gate Step 2/3: Running smoke:0...");
-    let smoke_0_start = std::time::Instant::now();
-    let smoke_0_output = utils::create_shell_command("pnpm", &["run", "smoke:0"])
-        .current_dir(&workspace_path)
-        .output()
-        .map_err(|e| format!("Failed to run smoke:0: {}", e))?;
-    result.duration_smoke_0_sec = smoke_0_start.elapsed().as_secs_f64();
-    println!("[Epris] Smoke:0 finished in {:.2}s", result.duration_smoke_0_sec);
-    
-    if !smoke_0_output.status.success() {
-        let stderr = String::from_utf8_lossy(&smoke_0_output.stderr);
-        result.error_output = format!(
-            "Smoke test (frame 0) failed:\n{}",
-            stderr.chars().take(2000).collect::<String>()
-        );
-        result.error = Some(result.error_output.clone());
+
+    if matches!(mode, GateMode::Fast) {
+        result.success = true;
+        result.passed = true;
+        set_progress(100.0, "Gate: Passed");
         result.total_duration_sec = gate_start.elapsed().as_secs_f64();
         log_gate_result(&workspace_path, &result);
         return Ok(result);
     }
-    result.smoke_0_passed = true;
-    result.smoke_0 = true;
-    
-    // Step 3: Smoke test mid frame
+
+    // Strict mode: Smoke test frame 0 first (cheap sanity for CLI render)
+    if matches!(mode, GateMode::Strict) {
+        set_progress(97.0, "Gate: Smoke (frame 0)");
+        println!("[Epris] Gate Step 2/3: Running smoke:0...");
+        let smoke_0_start = std::time::Instant::now();
+        let smoke_0_output = match run_step(&["run", "smoke:0"]) {
+            Ok(o) => o,
+            Err(e) => {
+                result.error_output = e.clone();
+                result.error = Some(e);
+                result.total_duration_sec = gate_start.elapsed().as_secs_f64();
+                log_gate_result(&workspace_path, &result);
+                return Ok(result);
+            }
+        };
+        result.duration_smoke_0_sec = smoke_0_start.elapsed().as_secs_f64();
+        println!("[Epris] Smoke:0 finished in {:.2}s", result.duration_smoke_0_sec);
+
+        if !smoke_0_output.status.success() {
+            let stderr = String::from_utf8_lossy(&smoke_0_output.stderr);
+            result.error_output = format!(
+                "Smoke test (frame 0) failed:\n{}",
+                stderr.chars().take(2000).collect::<String>()
+            );
+            result.error = Some(result.error_output.clone());
+            result.total_duration_sec = gate_start.elapsed().as_secs_f64();
+            log_gate_result(&workspace_path, &result);
+            return Ok(result);
+        }
+        result.smoke_0_passed = true;
+        result.smoke_0 = true;
+    }
+
+    // Balanced/Strict: Smoke test mid frame
+    set_progress(99.0, "Gate: Smoke (mid)");
     println!("[Epris] Gate Step 3/3: Running smoke:mid...");
     let smoke_mid_start = std::time::Instant::now();
-    let smoke_mid_output = utils::create_shell_command("pnpm", &["run", "smoke:mid"])
-        .current_dir(&workspace_path)
-        .output()
-        .map_err(|e| format!("Failed to run smoke:mid: {}", e))?;
+    let smoke_mid_output = match run_step(&["run", "smoke:mid"]) {
+        Ok(o) => o,
+        Err(e) => {
+            result.error_output = e.clone();
+            result.error = Some(e);
+            result.total_duration_sec = gate_start.elapsed().as_secs_f64();
+            log_gate_result(&workspace_path, &result);
+            return Ok(result);
+        }
+    };
     result.duration_smoke_mid_sec = smoke_mid_start.elapsed().as_secs_f64();
     println!("[Epris] Smoke:mid finished in {:.2}s", result.duration_smoke_mid_sec);
     
@@ -121,6 +261,7 @@ pub async fn run_gate(workspace_path: String) -> Result<GateResult, String> {
     // All passed
     result.success = true;
     result.passed = true;
+    set_progress(100.0, "Gate: Passed");
     
     println!("[Epris] Gate validation PASSED");
     result.total_duration_sec = gate_start.elapsed().as_secs_f64();
