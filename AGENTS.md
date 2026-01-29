@@ -7,13 +7,18 @@ Aim: To create a desktop application that can generate code videos using AI and 
 
 ## 2. Project Plan
 
-The full plan is in: docs\Epris_Desktop_Version_Plans.md, however, a lot of the plans need to be updated and restructured so don't take them as a final plan. However, the V0 plan I have almost finished and the current implementation is an extension of the plan.
+The full plan is in: docs\Epris_Desktop_Version_Plans.md, however, a lot of the plans need to be updated and restructured so don't take them as a final plan.
 
-The previous implementation plan of this project (which is the V0 stage) is: docs\Epris_v0_development_plan.md
-and: docs\step_11_gemini_cli_open_code_provider_first_run_wizard_remotion_skills_spec.md
-You should read these documents carefully and research into the project's current state before starting to work on it. If you find any discrepancies or errors, please **notify me first** before proceeding.
+The previous implementation plan of this project (which is the V0 stage) is:
+
+- docs\Archived\Epris_v0_development_plan.md
+- docs\Archived\step_11_gemini_cli_open_code_provider_first_run_wizard_remotion_skills_spec.md
+- docs\Archived\step_12_13_14.md
+  You should read these documents carefully and research into the project's current state before starting to work on it. If you find any discrepancies or errors, please **notify me first** before proceeding.
 
 I have put the two main references for step 11 in your skills: gemini-cli and opencode-server, these two give you a basic idea of how to integrate these two CLI into Epris.
+
+Right now, I am implementing the V0.5 plan, which is in docs\epris_v_0.5.md.
 
 # Modern Full-Stack Development Guidelines
 
@@ -26,7 +31,7 @@ You **can** deviate from the requirements below (especially when you are explici
 
 - **Python:** **Exclusively use `uv`** for all package management and virtual environment tasks. Manage dependencies **solely** via `pyproject.toml` (Project Mode).
 - **JavaScript:** **Exclusively use `pnpm`** for dependency management.
-- **Project Structure:** Default to a Monorepo structure, maintaining strict separation between `/backend` (FastAPI) and `/web` (Next.js).
+- **Project Structure:** For a webapp project, default to a Monorepo structure, maintaining strict separation between `/backend` (FastAPI) and `/web` (Next.js). If the project is other form, there is not yet any standard yet.
 
 ## 2. Backend Standard (Python)
 

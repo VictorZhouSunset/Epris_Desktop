@@ -312,6 +312,7 @@ pub fn create_project(
         s.projects.insert(
             project_id.clone(),
             ProjectState {
+                schema_version: 1,
                 id: project_id.clone(),
                 name: base_name.clone(),
                 path: project_dir.to_string_lossy().to_string(),

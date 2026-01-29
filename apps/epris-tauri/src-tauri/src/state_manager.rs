@@ -2,6 +2,8 @@ use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+const STATE_SCHEMA_VERSION: u32 = 1;
+
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct ToolchainVersion {
     pub version: String,
@@ -31,8 +33,11 @@ pub struct WorkspaceState {
     pub skills: Option<RemotionSkillState>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ProjectState {
+    #[serde(default = "default_state_schema_version")]
+    pub schema_version: u32,
+
     pub id: String,
     pub name: String,
     pub path: String,
@@ -41,8 +46,29 @@ pub struct ProjectState {
     pub last_opened_at: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+fn default_state_schema_version() -> u32 {
+    STATE_SCHEMA_VERSION
+}
+
+impl Default for ProjectState {
+    fn default() -> Self {
+        Self {
+            schema_version: STATE_SCHEMA_VERSION,
+            id: String::new(),
+            name: String::new(),
+            path: String::new(),
+            provider: String::new(),
+            created_at: None,
+            last_opened_at: None,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppStateStore {
+    #[serde(default = "default_state_schema_version")]
+    pub schema_version: u32,
+
     pub toolchain: ToolchainState,
     pub workspaces: HashMap<String, WorkspaceState>,
 
@@ -55,6 +81,22 @@ pub struct AppStateStore {
 
     pub stt_whisper_model: Option<String>,
     pub stt_whisper_task: Option<String>,
+}
+
+impl Default for AppStateStore {
+    fn default() -> Self {
+        Self {
+            schema_version: STATE_SCHEMA_VERSION,
+            toolchain: ToolchainState::default(),
+            workspaces: HashMap::new(),
+            projects_root: None,
+            active_project_id: None,
+            projects: HashMap::new(),
+            gemini_api_key: None,
+            stt_whisper_model: None,
+            stt_whisper_task: None,
+        }
+    }
 }
 
 pub struct StateManager {
@@ -98,6 +140,24 @@ impl StateManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_state_json_includes_schema_version_key() {
+        let v = serde_json::to_value(AppStateStore::default()).unwrap();
+        assert!(
+            v.get("schema_version").is_some(),
+            "state.json should include schema_version for future migrations"
+        );
+    }
+
+    #[test]
+    fn test_project_json_includes_schema_version_key() {
+        let v = serde_json::to_value(ProjectState::default()).unwrap();
+        assert!(
+            v.get("schema_version").is_some(),
+            "project metadata should include schema_version for future migrations"
+        );
+    }
 
     #[test]
     fn test_state_persistence() {

@@ -1,8 +1,11 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { getVersion } from '@tauri-apps/api/app';
 import { listen } from '@tauri-apps/api/event';
 import { X, Cpu, Key, LogIn, CheckCircle2, AlertCircle, Download, RefreshCw, Terminal, FolderOpen } from 'lucide-react';
 import { IpcService } from '../lib/ipc';
+import { checkForUpdate, downloadAndInstall, type UpdatePhase } from '../lib/updater';
+import type { Update } from '@tauri-apps/plugin-updater';
 import type { SttStatus } from '../types/backend';
 
 interface SettingsProps {
@@ -29,6 +32,13 @@ const PROVIDERS = [
 ];
 
 export function Settings({ onClose, currentProvider, onProviderChange }: SettingsProps) {
+  const [appVersion, setAppVersion] = useState<string>('');
+
+  const [updatePhase, setUpdatePhase] = useState<UpdatePhase>('idle');
+  const [updateMessage, setUpdateMessage] = useState<string>('');
+  const [updateError, setUpdateError] = useState<string>('');
+  const [availableUpdate, setAvailableUpdate] = useState<Update | null>(null);
+
   const [apiKeyStatus, setApiKeyStatus] = useState<'checking' | 'valid' | 'invalid'>('checking');
   const [geminiKey, setGeminiKey] = useState('');
   
@@ -47,6 +57,10 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
   const [sttProgress, setSttProgress] = useState<string>('');
 
   useEffect(() => {
+    getVersion()
+      .then((v) => setAppVersion(v))
+      .catch(() => setAppVersion(''));
+
     const saved = window.localStorage.getItem('epris_stt_model_selection');
     if (saved === 'tiny' || saved === 'tiny.en' || saved === 'small') {
       setSttModel(saved as 'tiny' | 'tiny.en' | 'small');
@@ -110,6 +124,46 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
       console.error('Failed to check environment:', e);
     } finally {
       setCheckingEnv(false);
+    }
+  };
+
+  const canInteractWithUpdater =
+    updatePhase !== 'checking' && updatePhase !== 'downloading' && updatePhase !== 'installing';
+
+  const handleCheckUpdates = async () => {
+    setUpdateError('');
+    setUpdateMessage('');
+    setAvailableUpdate(null);
+    setUpdatePhase('checking');
+    try {
+      const update = await checkForUpdate();
+      if (!update) {
+        setUpdatePhase('idle');
+        setUpdateMessage('No updates available.');
+        return;
+      }
+      setAvailableUpdate(update);
+      setUpdatePhase('available');
+      setUpdateMessage(`Update available: ${update.version}`);
+    } catch (e) {
+      setUpdatePhase('error');
+      setUpdateError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const handleDownloadAndInstallUpdate = async () => {
+    if (!availableUpdate) return;
+    setUpdateError('');
+    setUpdateMessage('');
+    setUpdatePhase('downloading');
+    try {
+      setUpdatePhase('installing');
+      await downloadAndInstall(availableUpdate);
+      setUpdatePhase('done');
+      setUpdateMessage('Update installed. Restart the app to finish.');
+    } catch (e) {
+      setUpdatePhase('error');
+      setUpdateError(e instanceof Error ? e.message : String(e));
     }
   };
 
@@ -279,6 +333,43 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
         </header>
 
         <div className="space-y-6">
+          {/* Updates */}
+          <div className="p-4 bg-slate-800/30 rounded-xl border border-slate-700 space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-medium text-slate-300">Updates</span>
+              <span className="text-[11px] text-slate-500">{appVersion ? `v${appVersion}` : 'v?'}</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => void handleCheckUpdates()}
+                className="px-3 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg text-xs font-bold text-slate-200 transition-colors flex items-center gap-2 disabled:opacity-50"
+                disabled={!canInteractWithUpdater}
+                title="Check for updates"
+              >
+                <RefreshCw size={14} className={updatePhase === 'checking' ? 'animate-spin' : ''} />
+                {updatePhase === 'checking' ? 'Checking…' : 'Check'}
+              </button>
+
+              <button
+                onClick={() => void handleDownloadAndInstallUpdate()}
+                className="px-3 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-xs font-bold text-white transition-colors flex items-center gap-2 disabled:opacity-50"
+                disabled={!availableUpdate || !canInteractWithUpdater}
+                title="Download and install update"
+              >
+                <Download size={14} />
+                {updatePhase === 'downloading' || updatePhase === 'installing' ? 'Installing…' : 'Install'}
+              </button>
+            </div>
+
+            {!!availableUpdate && (
+              <div className="text-[11px] text-slate-500">
+                Available: {availableUpdate.currentVersion} → {availableUpdate.version}
+              </div>
+            )}
+            {!!updateMessage && <div className="text-[11px] text-slate-300">{updateMessage}</div>}
+            {!!updateError && <div className="text-[11px] text-red-300">{updateError}</div>}
+          </div>
+
           {/* Projects Root */}
           <div className="p-4 bg-slate-800/30 rounded-xl border border-slate-700 space-y-3">
             <div className="flex items-center justify-between">

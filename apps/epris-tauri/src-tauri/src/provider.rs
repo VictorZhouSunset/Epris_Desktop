@@ -118,13 +118,18 @@ impl ProviderManager {
             return Ok(0);
         }
 
-        let mut child_cmd = if cfg!(target_os = "windows") {
-            let mut c = Command::new("cmd");
-            c.arg("/C").arg(prog);
-            c.creation_flags(0x08000000); 
-            c
-        } else {
-            Command::new(prog)
+        let mut child_cmd = {
+            #[cfg(target_os = "windows")]
+            {
+                let mut c = Command::new("cmd");
+                c.arg("/C").arg(prog);
+                c.creation_flags(0x08000000);
+                c
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                Command::new(prog)
+            }
         };
 
         child_cmd.env("PATH", new_path);
@@ -291,13 +296,18 @@ pub async fn run_provider_cli(
     args.push("--debug".to_string());
 
     let prog = if provider_name == "gemini" { "gemini" } else { "opencode" };
-    let mut cmd = if cfg!(target_os = "windows") {
-        let mut c = Command::new("cmd");
-        c.arg("/C").arg(prog);
-        c.creation_flags(0x08000000);
-        c
-    } else {
-        Command::new(prog)
+    let mut cmd = {
+        #[cfg(target_os = "windows")]
+        {
+            let mut c = Command::new("cmd");
+            c.arg("/C").arg(prog);
+            c.creation_flags(0x08000000);
+            c
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Command::new(prog)
+        }
     };
 
     cmd.args(args);

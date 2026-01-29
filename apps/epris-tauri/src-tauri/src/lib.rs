@@ -58,6 +58,29 @@ fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
 }
 
+#[tauri::command]
+fn append_updater_log(app_handle: tauri::AppHandle, line: String) -> Result<(), String> {
+    let app_dir = app_handle
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+    let logs_dir = app_dir.join("logs");
+    std::fs::create_dir_all(&logs_dir).map_err(|e| e.to_string())?;
+
+    let path = logs_dir.join("updater.log");
+    let now = chrono::Utc::now().to_rfc3339();
+    let entry = format!("[{}] {}\n", now, line.trim_end());
+
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| e.to_string())?;
+    f.write_all(entry.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 // Preview server logic moved to preview.rs
 
 // ============================================================================
@@ -154,6 +177,13 @@ pub fn run() {
         .manage(Mutex::new(opencode::OpenCodeState::default()))
         .manage(Mutex::new(export::ExportState::default()))
         .setup(|app| {
+            #[cfg(desktop)]
+            {
+                if let Err(e) = app.handle().plugin(tauri_plugin_updater::Builder::new().build()) {
+                    eprintln!("[Epris] Failed to initialize updater plugin: {}", e);
+                }
+            }
+
             // Signal Handler for Ctrl+C (Terminal Exit)
             let handle = app.handle().clone();
             ctrlc::set_handler(move || {
@@ -206,6 +236,7 @@ pub fn run() {
             // Environment & Gemini
             get_environment_status,
             get_app_state,
+            append_updater_log,
             environment::install_missing_dependencies,
             environment::get_gemini_auth_status,
             environment::open_gemini_login,
