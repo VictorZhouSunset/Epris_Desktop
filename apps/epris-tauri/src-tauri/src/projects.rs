@@ -78,8 +78,56 @@ fn resolve_template_dir(app_handle: &tauri::AppHandle) -> Result<PathBuf, String
             .path()
             .resolve("workspace-template", tauri::path::BaseDirectory::Resource)
             .map_err(|e| format!("Failed to resolve resource 'workspace-template': {}", e))?;
-        return Ok(template);
+        if template.exists() && template.is_dir() {
+            return Ok(template);
+        }
+
+        let resource_dir = app_handle
+            .path()
+            .resource_dir()
+            .map_err(|e| format!("Failed to get resource_dir: {}", e))?;
+
+        if let Some(found) = find_template_dir_in_resource_dir(&resource_dir) {
+            return Ok(found);
+        }
+
+        Err(format!(
+            "Template directory not found. Resolved path: {}. resource_dir: {}",
+            template.to_string_lossy(),
+            resource_dir.to_string_lossy()
+        ))
     }
+}
+
+#[allow(dead_code)]
+fn resource_dir_looks_like_workspace_template(resource_dir: &Path) -> bool {
+    let pkg = resource_dir.join("package.json");
+    if !pkg.exists() {
+        return false;
+    }
+    let content = std::fs::read_to_string(pkg).unwrap_or_default();
+    content.contains("\"name\"") && content.contains("epris-workspace-template")
+}
+
+#[allow(dead_code)]
+fn find_template_dir_in_resource_dir(resource_dir: &Path) -> Option<PathBuf> {
+    // Some bundlers place the directory as-is (resource_dir/workspace-template).
+    // Others may copy directory contents into resource_dir directly.
+    if resource_dir_looks_like_workspace_template(resource_dir) {
+        return Some(resource_dir.to_path_buf());
+    }
+
+    let entries = std::fs::read_dir(resource_dir).ok()?;
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if !p.is_dir() {
+            continue;
+        }
+        if resource_dir_looks_like_workspace_template(&p) {
+            return Some(p);
+        }
+    }
+    None
 }
 
 fn ensure_public_assets_dir(project_path: &Path) -> Result<(), String> {
@@ -160,6 +208,40 @@ fn flatten_if_nested_workspace_template(project_dir: &Path) -> Result<(), String
 
     let _ = std::fs::remove_dir_all(&nested);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn detects_template_when_package_json_is_at_resource_root() {
+        let tmp = tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("package.json"),
+            r#"{ "name": "epris-workspace-template" }"#,
+        )
+        .unwrap();
+
+        let found = find_template_dir_in_resource_dir(tmp.path()).unwrap();
+        assert_eq!(found, tmp.path());
+    }
+
+    #[test]
+    fn detects_template_when_nested_in_workspace_template_dir() {
+        let tmp = tempdir().unwrap();
+        let nested = tmp.path().join("workspace-template");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(
+            nested.join("package.json"),
+            r#"{ "name": "epris-workspace-template" }"#,
+        )
+        .unwrap();
+
+        let found = find_template_dir_in_resource_dir(tmp.path()).unwrap();
+        assert_eq!(found, nested);
+    }
 }
 
 #[tauri::command]
