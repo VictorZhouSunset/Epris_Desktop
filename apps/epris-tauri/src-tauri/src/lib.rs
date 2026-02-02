@@ -27,6 +27,64 @@ use crate::state_manager::{StateManager, AppStateStore};
 use crate::environment::{EnvironmentManager, EnvironmentStatus};
 // Duplicate Manager import removed
 
+fn maybe_migrate_legacy_app_data_dir(app_handle: &tauri::AppHandle) {
+    let Ok(current_dir) = app_handle.path().app_local_data_dir() else {
+        return;
+    };
+    let current_state = current_dir.join("state.json");
+    if current_state.exists() {
+        return;
+    }
+
+    let Some(parent) = current_dir.parent() else {
+        return;
+    };
+
+    // Best-effort migration for app renames (e.g. productName changes).
+    // If the new app data dir is empty/missing but an old one exists, copy/move it forward.
+    let legacy_candidates = ["epris-tauri", "Epris", "epris"];
+    for legacy_name in legacy_candidates {
+        if let Some(n) = current_dir.file_name() {
+            if n == legacy_name {
+                continue;
+            }
+        }
+
+        let legacy_dir = parent.join(legacy_name);
+        let legacy_state = legacy_dir.join("state.json");
+        if !legacy_state.exists() {
+            continue;
+        }
+
+        if !current_dir.exists() {
+            if std::fs::rename(&legacy_dir, &current_dir).is_ok() {
+                println!(
+                    "[Epris] Migrated app data dir (rename): {} -> {}",
+                    legacy_dir.to_string_lossy(),
+                    current_dir.to_string_lossy()
+                );
+                return;
+            }
+        }
+
+        // Fallback: copy inside, keep legacy dir in place (safer).
+        let _ = std::fs::create_dir_all(&current_dir);
+        let mut options = fs_extra::dir::CopyOptions::new();
+        options.copy_inside = true;
+        options.overwrite = false;
+        let _ = fs_extra::dir::copy(&legacy_dir, &current_dir, &options);
+
+        if current_dir.join("state.json").exists() {
+            println!(
+                "[Epris] Migrated app data dir (copy): {} -> {}",
+                legacy_dir.to_string_lossy(),
+                current_dir.to_string_lossy()
+            );
+            return;
+        }
+    }
+}
+
 fn auto_save_active_project_checkpoint(app_handle: &tauri::AppHandle, reason: &str) {
     let app_dir = match app_handle.path().app_local_data_dir() {
         Ok(p) => p,
@@ -184,6 +242,7 @@ pub fn run() {
         .manage(Mutex::new(opencode::OpenCodeState::default()))
         .manage(Mutex::new(export::ExportState::default()))
         .setup(|app| {
+            maybe_migrate_legacy_app_data_dir(&app.handle());
             // Signal Handler for Ctrl+C (Terminal Exit)
             let handle = app.handle().clone();
             ctrlc::set_handler(move || {

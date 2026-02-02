@@ -8,6 +8,59 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tauri::Manager;
 
+#[cfg(any(test, not(debug_assertions)))]
+use include_dir::{include_dir, Dir};
+
+#[cfg(any(test, not(debug_assertions)))]
+static WORKSPACE_TEMPLATE_EMBEDDED: Dir<'static> =
+    include_dir!("$CARGO_MANIFEST_DIR/../../../workspace-template");
+
+#[cfg(any(test, not(debug_assertions)))]
+fn extract_embedded_template_to(dst_root: &Path, version: &str) -> Result<(), String> {
+    if dst_root.exists() {
+        let _ = std::fs::remove_dir_all(dst_root);
+    }
+    std::fs::create_dir_all(dst_root).map_err(|e| e.to_string())?;
+
+    for file in WORKSPACE_TEMPLATE_EMBEDDED.files() {
+        let rel = file.path();
+        let dst = dst_root.join(rel);
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(&dst, file.contents()).map_err(|e| e.to_string())?;
+    }
+
+    std::fs::write(dst_root.join(".epris-template-version"), format!("{}\n", version))
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[cfg(any(test, not(debug_assertions)))]
+fn ensure_embedded_template_dir(app_handle: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let app_dir = app_handle
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+    let template_dir = app_dir.join("workspace-template");
+    let version_file = template_dir.join(".epris-template-version");
+    let current_version = app_handle.package_info().version.to_string();
+
+    let mut needs_extract = true;
+    if let Ok(existing) = std::fs::read_to_string(&version_file) {
+        if existing.trim() == current_version && template_dir.join("package.json").exists() {
+            needs_extract = false;
+        }
+    }
+
+    if !needs_extract {
+        return Ok(template_dir);
+    }
+
+    extract_embedded_template_to(&template_dir, &current_version)?;
+    Ok(template_dir)
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ProjectInfo {
     pub id: String,
@@ -91,11 +144,15 @@ fn resolve_template_dir(app_handle: &tauri::AppHandle) -> Result<PathBuf, String
             return Ok(found);
         }
 
-        Err(format!(
-            "Template directory not found. Resolved path: {}. resource_dir: {}",
-            template.to_string_lossy(),
-            resource_dir.to_string_lossy()
-        ))
+        match ensure_embedded_template_dir(app_handle) {
+            Ok(extracted) => Ok(extracted),
+            Err(extract_err) => Err(format!(
+                "Template directory not found. Resolved path: {}. resource_dir: {}. embedded_extract_error: {}",
+                template.to_string_lossy(),
+                resource_dir.to_string_lossy(),
+                extract_err
+            )),
+        }
     }
 }
 
@@ -241,6 +298,15 @@ mod tests {
 
         let found = find_template_dir_in_resource_dir(tmp.path()).unwrap();
         assert_eq!(found, nested);
+    }
+
+    #[test]
+    fn can_extract_embedded_template_to_app_data_style_dir() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("workspace-template");
+        extract_embedded_template_to(&dst, "0.0.0-test").unwrap();
+        assert!(dst.join("package.json").exists());
+        assert!(dst.join(".epris-template-version").exists());
     }
 }
 
