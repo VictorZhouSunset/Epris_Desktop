@@ -85,6 +85,12 @@ pub struct ActiveProjectConfig {
 }
 
 fn default_projects_root(app_handle: &tauri::AppHandle) -> Result<PathBuf, String> {
+    // Prefer a user-visible location for projects, so users can easily find/backup/move them.
+    // Fallback to app data dir if Documents isn't available.
+    if let Ok(documents_dir) = app_handle.path().document_dir() {
+        return Ok(documents_dir.join("Epris").join("projects"));
+    }
+
     Ok(app_handle
         .path()
         .app_local_data_dir()

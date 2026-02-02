@@ -8,6 +8,7 @@ use tauri::{Manager, Emitter};
 use walkdir::WalkDir;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
+use crate::toolchain;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EnvironmentStatus {
@@ -69,14 +70,38 @@ impl EnvironmentManager {
  
         // Check Provider (opencode or gemini)
         let cmd = if provider == "gemini" { "gemini" } else { "opencode" };
-        match self.check_command(cmd, &["--version"]) {
-             Ok(v) => {
+        match self.check_command_any(cmd, &[&["--version"], &["version"]]) {
+            Ok(v) => {
                 status.provider_cli_valid = true;
-                // TODO: improved check for binary name
-                status.details.provider_cli = Some(ToolchainVersion { version: v, source: "unknown".into() });
-            },
-            Err(_) => status.missing.push(cmd.into()),
-        }
+                let source = self.detect_source_from_where(cmd).unwrap_or_else(|| {
+                    if self.is_local(cmd)
+                        || self.is_local(&format!("{}.cmd", cmd))
+                        || self.is_local(&format!("{}.exe", cmd))
+                    {
+                        "local".to_string()
+                    } else {
+                        "system".to_string()
+                    }
+                });
+                status.details.provider_cli = Some(ToolchainVersion {
+                    version: v,
+                    source: source.into(),
+                });
+            }
+            Err(_) => {
+                // Some CLIs may not support `--version` but still exist on PATH.
+                if self.command_exists(cmd).is_some() {
+                    status.provider_cli_valid = true;
+                    let source = self.detect_source_from_where(cmd).unwrap_or_else(|| "system".to_string());
+                    status.details.provider_cli = Some(ToolchainVersion {
+                        version: "unknown".into(),
+                        source: source.into(),
+                    });
+                } else {
+                    status.missing.push(cmd.into());
+                }
+            }
+        };
  
         // Check Workspace Deps
         if let Some(path) = workspace_path {
@@ -110,6 +135,60 @@ impl EnvironmentManager {
     
     fn is_local(&self, binary_name: &str) -> bool {
         self.get_bin_dir().join(binary_name).exists()
+    }
+
+    fn check_command_any(&self, program: &str, candidates: &[&[&str]]) -> Result<String, String> {
+        let mut last_err = None;
+        for args in candidates {
+            match self.check_command(program, args) {
+                Ok(v) if !v.trim().is_empty() => return Ok(v),
+                Ok(_) => return Ok(String::new()),
+                Err(e) => last_err = Some(e),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| "Command failed".into()))
+    }
+
+    #[cfg(target_os = "windows")]
+    fn command_exists(&self, program: &str) -> Option<String> {
+        let bin_dir = self.get_bin_dir();
+        let path_env = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{};{}", bin_dir.to_string_lossy(), path_env);
+
+        let mut cmd = Command::new("cmd");
+        cmd.arg("/C").arg("where").arg(program);
+        cmd.env("PATH", new_path);
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+
+        let out = cmd.output().ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        stdout.lines().next().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn command_exists(&self, _program: &str) -> Option<String> {
+        None
+    }
+
+    #[cfg(target_os = "windows")]
+    fn detect_source_from_where(&self, program: &str) -> Option<String> {
+        let Some(p) = self.command_exists(program) else {
+            return None;
+        };
+        let bin_dir = self.get_bin_dir().to_string_lossy().to_string().to_ascii_lowercase();
+        let p_norm = p.to_ascii_lowercase();
+        if p_norm.starts_with(&bin_dir) {
+            return Some("local".to_string());
+        }
+        Some("system".to_string())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn detect_source_from_where(&self, _program: &str) -> Option<String> {
+        None
     }
 
     fn check_command(&self, program: &str, args: &[&str]) -> Result<String, String> {
@@ -225,6 +304,10 @@ pub async fn install_missing_dependencies(
                 .map_err(|e| e.to_string())?;
             let env_manager = EnvironmentManager::new(app_dir);
             run_pnpm_install(&window, &workspace_path, &env_manager).await?;
+        }
+
+        if step == "Installing toolchain" {
+            toolchain::ensure_local_toolchain(Some(&window), &provider, &window.app_handle()).await?;
         }
 
         if step == "Installing Remotion skills" {

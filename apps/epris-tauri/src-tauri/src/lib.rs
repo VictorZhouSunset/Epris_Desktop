@@ -10,6 +10,8 @@ mod utils;
 mod assets;
 mod stt;
 mod sandbox;
+mod toolchain;
+mod maintenance;
 
 use std::sync::Mutex;
 use tauri::Manager;
@@ -302,6 +304,7 @@ pub fn run() {
             environment::set_gemini_api_key,
             environment::open_gemini_auth_terminal,
             provider::stop_provider_cli,
+            maintenance::reset_user_data,
             assets::list_assets,
             assets::upload_asset,
             assets::delete_asset,

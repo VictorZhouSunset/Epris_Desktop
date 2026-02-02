@@ -49,6 +49,9 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
   const [projectsRoot, setProjectsRoot] = useState<string>('');
   const [movingProjects, setMovingProjects] = useState(false);
 
+  const [resetting, setResetting] = useState(false);
+  const [resetAlsoDeleteProjects, setResetAlsoDeleteProjects] = useState(false);
+
   const [stt, setStt] = useState<SttStatus | null>(null);
   const [sttInstalling, setSttInstalling] = useState(false);
   const [sttModel, setSttModel] = useState<'tiny' | 'tiny.en' | 'small'>('tiny.en');
@@ -290,6 +293,41 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
     }
   };
 
+  const handleResetUserData = async () => {
+    if (
+      !confirm(
+        `This will clear Epris user data on this PC.\n\nIt will remove:\n- local toolchain (Node/pnpm/OpenCode/Gemini)\n- logs\n- cached workspace-template\n- state/config\n\n${
+          resetAlsoDeleteProjects
+            ? 'It will ALSO delete all known project folders recorded by Epris.\n\n'
+            : ''
+        }You will need to restart the app after this.\n\nContinue?`,
+      )
+    ) {
+      return;
+    }
+
+    setResetting(true);
+    try {
+      const res = await IpcService.call<{
+        deleted: string[];
+        failed: { path: string; error: string }[];
+        projects_deleted: number;
+        restart_required: boolean;
+      }>('RESET_USER_DATA', { deleteProjects: resetAlsoDeleteProjects });
+
+      const failed = res.failed?.length ? `\n\nFailed:\n${res.failed.map((f) => `- ${f.path}: ${f.error}`).join('\n')}` : '';
+      alert(
+        `Done.\n\nDeleted: ${res.deleted?.length ?? 0}\nProjects deleted: ${res.projects_deleted ?? 0}\nRestart required: ${
+          res.restart_required ? 'yes' : 'no'
+        }${failed}`,
+      );
+    } catch (e) {
+      alert('Reset failed: ' + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setResetting(false);
+    }
+  };
+
   const handleLogin = async () => {
     try {
       await invoke('open_gemini_auth_terminal');
@@ -387,6 +425,39 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
             <div className="text-[11px] text-slate-500 break-all">{projectsRoot || '(not set)'}</div>
             <div className="text-[11px] text-slate-500">
               Changing this will move existing project folders to the new destination.
+            </div>
+          </div>
+
+          {/* Maintenance */}
+          <div className="p-4 bg-slate-800/30 rounded-xl border border-slate-700 space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-medium text-slate-300">Maintenance</span>
+              <span className="text-[11px] text-slate-500">Danger zone</span>
+            </div>
+
+            <label className="flex items-center gap-2 text-[11px] text-slate-400 select-none">
+              <input
+                type="checkbox"
+                className="accent-indigo-500"
+                checked={resetAlsoDeleteProjects}
+                onChange={(e) => setResetAlsoDeleteProjects(e.target.checked)}
+                disabled={resetting}
+              />
+              Also delete all projects (cannot be undone)
+            </label>
+
+            <button
+              onClick={() => void handleResetUserData()}
+              disabled={resetting}
+              className="w-full py-2 bg-red-600 hover:bg-red-500 text-white rounded-lg text-xs font-bold flex items-center justify-center gap-2 disabled:opacity-50 transition-all"
+              title="Clear local user data"
+            >
+              {resetting ? <RefreshCw size={14} className="animate-spin" /> : <AlertCircle size={14} />}
+              {resetting ? 'Clearing…' : 'Clear User Data'}
+            </button>
+
+            <div className="text-[11px] text-slate-500">
+              Clears local toolchain, logs, cache, and state. Restart required.
             </div>
           </div>
 

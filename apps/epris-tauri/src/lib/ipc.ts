@@ -42,6 +42,7 @@ export const TAURI_COMMANDS = {
   SET_GEMINI_API_KEY: 'set_gemini_api_key',
   GET_ENVIRONMENT_STATUS: 'get_environment_status',
   INSTALL_MISSING_DEPENDENCIES: 'install_missing_dependencies',
+  RESET_USER_DATA: 'reset_user_data',
   GET_VIDEO_CONFIG: 'get_video_config',
   SET_VIDEO_CONFIG: 'set_video_config',
   LIST_ASSETS: 'list_assets',
