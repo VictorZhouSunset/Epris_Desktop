@@ -35,6 +35,7 @@ export function FirstRunWizard({ workspacePath, provider, onComplete }: FirstRun
   const [sttInstalling, setSttInstalling] = useState(false);
   const [sttLogs, setSttLogs] = useState<string[]>([]);
   const [sttProgress, setSttProgress] = useState<string>('');
+  const [sttProgressPercent, setSttProgressPercent] = useState<number | null>(null);
   const [sttModel, setSttModel] = useState<'tiny' | 'tiny.en' | 'small'>('tiny.en');
 
   const checkEnv = useCallback(async () => {
@@ -103,8 +104,10 @@ export function FirstRunWizard({ workspacePath, provider, onComplete }: FirstRun
 
       if (total && percent !== null && total > 0) {
         setSttProgress(`${label}: ${mb(downloaded)} / ${mb(total)} MB (${Math.round(percent)}%)`);
+        setSttProgressPercent(percent);
       } else {
         setSttProgress(`${label}: ${mb(downloaded)} MB`);
+        setSttProgressPercent(null);
       }
     });
 
@@ -139,6 +142,7 @@ export function FirstRunWizard({ workspacePath, provider, onComplete }: FirstRun
     setSttInstalling(true);
     setSttLogs([]);
     setSttProgress('');
+    setSttProgressPercent(null);
     try {
       await invoke('install_whispercpp', { model: sttModel });
       await checkStt();
@@ -271,7 +275,17 @@ export function FirstRunWizard({ workspacePath, provider, onComplete }: FirstRun
               </div>
 	            </div>
 	            {sttInstalling && sttProgress && (
-	              <div className="mt-3 text-xs text-slate-300 font-mono">{sttProgress}</div>
+	              <div className="mt-3 space-y-2">
+                  {sttProgressPercent !== null && (
+                    <div className="h-2 bg-slate-800 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-indigo-500 transition-all duration-300 ease-out"
+                        style={{ width: `${Math.max(0, Math.min(100, sttProgressPercent))}%` }}
+                      />
+                    </div>
+                  )}
+                  <div className="text-xs text-slate-300 font-mono">{sttProgress}</div>
+                </div>
 	            )}
 	            {sttLogs.length > 0 && (
 	              <div className="mt-4 bg-slate-950 rounded-lg p-3 font-mono text-xs text-slate-400 max-h-28 overflow-y-auto border border-slate-800">

@@ -15,6 +15,10 @@ pub const FORBIDDEN_FILES: &[&str] = &[
 use std::os::windows::process::CommandExt;
 
 /// Searches upward from the given path to find the project root containing the anchor.
+///
+/// NOTE: This is only used in dev builds to find repo-relative resources.
+/// Release builds use Tauri resources / embedded templates instead.
+#[cfg(any(test, debug_assertions))]
 pub fn find_project_root(start_path: &Path, anchor: &str) -> Option<PathBuf> {
     let mut current = start_path.to_path_buf();
     loop {

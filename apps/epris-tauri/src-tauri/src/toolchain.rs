@@ -7,9 +7,9 @@ use crate::utils;
 #[cfg(target_os = "windows")]
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "windows")]
-use tauri::Emitter;
-#[cfg(target_os = "windows")]
 use tauri::Manager;
+#[cfg(target_os = "windows")]
+use crate::install_log;
 
 #[cfg(target_os = "windows")]
 const PINNED_NODE_VERSION: &str = "24.13.0";
@@ -34,6 +34,7 @@ const NODE_WIN_X64_ZIP_SHA256: &str =
 #[cfg(not(target_os = "windows"))]
 pub async fn ensure_local_toolchain(
     _window: Option<&tauri::Window>,
+    _workspace_path: Option<&std::path::Path>,
     _provider: &str,
     _app_handle: &tauri::AppHandle,
 ) -> Result<(), String> {
@@ -43,6 +44,7 @@ pub async fn ensure_local_toolchain(
 #[cfg(target_os = "windows")]
 pub async fn ensure_local_toolchain(
     window: Option<&tauri::Window>,
+    workspace_path: Option<&Path>,
     provider: &str,
     app_handle: &tauri::AppHandle,
 ) -> Result<(), String> {
@@ -52,66 +54,82 @@ pub async fn ensure_local_toolchain(
         .map_err(|e| e.to_string())?;
     let env = EnvironmentManager::new(app_dir.clone());
 
-    emit_log(window, "Toolchain: ensuring local Node.js...")?;
-    ensure_node(window, &env).await?;
-    emit_log(window, "Toolchain: ensuring local npm shims...")?;
+    emit_log(window, &app_dir, workspace_path, "Toolchain: ensuring local Node.js...")?;
+    ensure_node(window, &app_dir, workspace_path, &env).await?;
+    emit_log(window, &app_dir, workspace_path, "Toolchain: ensuring local npm shims...")?;
     ensure_npm_shims(&env)?;
 
-    emit_log(window, "Toolchain: ensuring local pnpm...")?;
-    ensure_npm_global_package(window, &env, "pnpm", Some(PINNED_PNPM_VERSION)).await?;
+    emit_log(window, &app_dir, workspace_path, "Toolchain: ensuring local pnpm...")?;
+    ensure_npm_global_package(window, &app_dir, workspace_path, &env, "pnpm", Some(PINNED_PNPM_VERSION)).await?;
 
-    // Provider CLIs:
-    // - gemini: npm package @google/gemini-cli
-    // - opencode: npm package opencode-ai (tries pinned version, then latest)
-    // We install both to keep provider switching smooth.
-    emit_log(window, "Toolchain: ensuring local Gemini CLI...")?;
-    if let Err(e) = ensure_npm_global_package(
-        window,
-        &env,
-        "@google/gemini-cli",
-        Some(PINNED_GEMINI_CLI_VERSION),
-    )
-    .await
-    {
-        emit_log(
+    // Provider CLIs (install only the currently selected provider).
+    if provider == "gemini" {
+        emit_log(window, &app_dir, workspace_path, "Toolchain: ensuring local Gemini CLI...")?;
+        if let Err(e) = ensure_npm_global_package(
             window,
-            &format!(
-                "Toolchain: Gemini pinned install failed ({}). Falling back to latest...",
-                e
-            ),
-        )?;
-        ensure_npm_global_package(window, &env, "@google/gemini-cli", None).await?;
-    }
-
-    emit_log(window, "Toolchain: ensuring local OpenCode CLI...")?;
-    if let Err(e) = ensure_npm_global_package(window, &env, "opencode-ai", Some(PINNED_OPENCODE_VERSION)).await {
-        // Best-effort: OpenCode has seen Windows packaging changes. Fall back to latest.
-        emit_log(
-            window,
-            &format!(
-                "Toolchain: OpenCode pinned install failed ({}). Falling back to latest...",
-                e
-            ),
-        )?;
-        ensure_npm_global_package(window, &env, "opencode-ai", None).await?;
+            &app_dir,
+            workspace_path,
+            &env,
+            "@google/gemini-cli",
+            Some(PINNED_GEMINI_CLI_VERSION),
+        )
+        .await
+        {
+            emit_log(
+                window,
+                &app_dir,
+                workspace_path,
+                &format!(
+                    "Toolchain: Gemini pinned install failed ({}). Falling back to latest...",
+                    e
+                ),
+            )?;
+            ensure_npm_global_package(window, &app_dir, workspace_path, &env, "@google/gemini-cli", None).await?;
+        }
+    } else {
+        emit_log(window, &app_dir, workspace_path, "Toolchain: ensuring local OpenCode CLI...")?;
+        if let Err(e) =
+            ensure_npm_global_package(window, &app_dir, workspace_path, &env, "opencode-ai", Some(PINNED_OPENCODE_VERSION))
+                .await
+        {
+            // Best-effort: OpenCode has seen Windows packaging changes. Fall back to latest.
+            emit_log(
+                window,
+                &app_dir,
+                workspace_path,
+                &format!(
+                    "Toolchain: OpenCode pinned install failed ({}). Falling back to latest...",
+                    e
+                ),
+            )?;
+            ensure_npm_global_package(window, &app_dir, workspace_path, &env, "opencode-ai", None).await?;
+        }
     }
 
     // Persist observed tool versions into state.json (best-effort).
     record_toolchain_versions(app_handle, &env, provider);
-    emit_log(window, "Toolchain: done.")?;
+    emit_log(window, &app_dir, workspace_path, "Toolchain: done.")?;
     Ok(())
 }
 
 #[cfg(target_os = "windows")]
-fn emit_log(window: Option<&tauri::Window>, line: &str) -> Result<(), String> {
-    if let Some(w) = window {
-        let _ = w.emit("env_install_log", line.to_string());
-    }
+fn emit_log(
+    window: Option<&tauri::Window>,
+    app_data_dir: &Path,
+    workspace_path: Option<&Path>,
+    line: &str,
+) -> Result<(), String> {
+    install_log::log_env_install(window, Some(app_data_dir), workspace_path, line);
     Ok(())
 }
 
 #[cfg(target_os = "windows")]
-async fn ensure_node(window: Option<&tauri::Window>, env: &EnvironmentManager) -> Result<(), String> {
+async fn ensure_node(
+    window: Option<&tauri::Window>,
+    app_data_dir: &Path,
+    workspace_path: Option<&Path>,
+    env: &EnvironmentManager,
+) -> Result<(), String> {
     let toolchain_dir = env.toolchain_dir.clone();
     let node_dir = toolchain_dir.join("node");
     let bin_dir = env.get_bin_dir();
@@ -132,11 +150,13 @@ async fn ensure_node(window: Option<&tauri::Window>, env: &EnvironmentManager) -
 
     emit_log(
         window,
+        app_data_dir,
+        workspace_path,
         &format!("Toolchain: downloading Node.js v{}...", PINNED_NODE_VERSION),
     )?;
 
     let zip_path = toolchain_dir.join(format!("node-v{}-win-x64.zip", PINNED_NODE_VERSION));
-    download_file(window, &zip_path, NODE_WIN_X64_ZIP_URL, "Node.js (zip)").await?;
+    download_file(window, app_data_dir, workspace_path, &zip_path, NODE_WIN_X64_ZIP_URL, "Node.js (zip)").await?;
     verify_sha256(&zip_path, NODE_WIN_X64_ZIP_SHA256)?;
 
     // Extract into a temp folder, then flatten into node_dir.
@@ -211,6 +231,8 @@ fn ensure_npm_shims(env: &EnvironmentManager) -> Result<(), String> {
 #[cfg(target_os = "windows")]
 async fn ensure_npm_global_package(
     window: Option<&tauri::Window>,
+    app_data_dir: &Path,
+    workspace_path: Option<&Path>,
     env: &EnvironmentManager,
     package: &str,
     version: Option<&str>,
@@ -227,7 +249,7 @@ async fn ensure_npm_global_package(
         None => package.to_string(),
     };
 
-    emit_log(window, &format!("Toolchain: npm -g install {}", pkg_spec))?;
+    emit_log(window, app_data_dir, workspace_path, &format!("Toolchain: npm -g install {}", pkg_spec))?;
 
     // Ensure npm is callable.
     let npm_cmd = bin_dir.join("npm.cmd");
@@ -332,6 +354,8 @@ fn run_exe_capture(exe_path: &Path, args: &[&str], bin_dir: &Path) -> Result<Str
 #[cfg(target_os = "windows")]
 async fn download_file(
     window: Option<&tauri::Window>,
+    app_data_dir: &Path,
+    workspace_path: Option<&Path>,
     path: &Path,
     url: &str,
     label: &str,
@@ -374,7 +398,7 @@ async fn download_file(
         let _ = tokio::fs::remove_file(path).await;
     }
     tokio::fs::rename(&tmp, path).await.map_err(|e| e.to_string())?;
-    emit_log(window, &format!("Toolchain: downloaded {}", label))?;
+    emit_log(window, app_data_dir, workspace_path, &format!("Toolchain: downloaded {}", label))?;
     Ok(())
 }
 

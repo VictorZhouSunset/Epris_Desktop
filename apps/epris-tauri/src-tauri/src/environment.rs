@@ -9,6 +9,8 @@ use walkdir::WalkDir;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use crate::toolchain;
+use std::io::Write;
+use crate::install_log;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EnvironmentStatus {
@@ -279,6 +281,20 @@ pub async fn install_missing_dependencies(
     provider: String
 ) -> Result<(), String> {
     println!("[Epris] Installing dependencies for {} in {}...", provider, workspace_path);
+
+    let app_dir = window
+        .app_handle()
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| e.to_string())?;
+    let ws_path = std::path::PathBuf::from(&workspace_path);
+    install_log::begin_env_install(
+        Some(&window),
+        Some(&app_dir),
+        Some(&ws_path),
+        &provider,
+        &workspace_path,
+    );
     
     // Simulate stages as per spec
     let stages = [
@@ -294,26 +310,37 @@ pub async fn install_missing_dependencies(
             "step": step,
             "percent": percent
         }));
-        let _ = window.emit("env_install_log", format!("Stage: {}", step));
+        install_log::log_env_install(
+            Some(&window),
+            Some(&app_dir),
+            Some(&ws_path),
+            &format!("Stage: {}", step),
+        );
 
         if step == "Bootstrapping workspace" {
-            let app_dir = window
-                .app_handle()
-                .path()
-                .app_local_data_dir()
-                .map_err(|e| e.to_string())?;
-            let env_manager = EnvironmentManager::new(app_dir);
+            let env_manager = EnvironmentManager::new(app_dir.clone());
             run_pnpm_install(&window, &workspace_path, &env_manager).await?;
         }
 
         if step == "Installing toolchain" {
-            toolchain::ensure_local_toolchain(Some(&window), &provider, &window.app_handle()).await?;
+            toolchain::ensure_local_toolchain(
+                Some(&window),
+                Some(&ws_path),
+                &provider,
+                &window.app_handle(),
+            )
+            .await?;
         }
 
         if step == "Installing Remotion skills" {
-             let app_dir = window.app_handle().path().app_local_data_dir().map_err(|e| e.to_string())?;
-             let env_manager = EnvironmentManager::new(app_dir);
-             crate::skills::SkillsManager::install_remotion_skills(Some(&window), &workspace_path, &provider, &env_manager).await?;
+            let env_manager = EnvironmentManager::new(app_dir.clone());
+            crate::skills::SkillsManager::install_remotion_skills(
+                Some(&window),
+                &workspace_path,
+                &provider,
+                &env_manager,
+            )
+            .await?;
         }
 
         tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
@@ -327,7 +354,25 @@ async fn run_pnpm_install(
     workspace_path: &str,
     env_manager: &EnvironmentManager,
 ) -> Result<(), String> {
-    let _ = window.emit("env_install_log", "Running pnpm install...".to_string());
+    let app_data_dir = install_log::toolchain_dir_to_app_data_dir(&env_manager.toolchain_dir);
+    let ws_path = std::path::Path::new(workspace_path).to_path_buf();
+    install_log::log_env_install(
+        Some(window),
+        app_data_dir.as_deref(),
+        Some(&ws_path),
+        "Running pnpm install...",
+    );
+
+    let logs_dir = std::path::Path::new(workspace_path).join("logs");
+    let _ = std::fs::create_dir_all(&logs_dir);
+    let pnpm_log_path = logs_dir.join("pnpm-install.log");
+    let pnpm_log = std::sync::Arc::new(std::sync::Mutex::new(
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&pnpm_log_path)
+            .map_err(|e| e.to_string())?,
+    ));
 
     let bin_dir = env_manager.get_bin_dir();
     let path_env = std::env::var("PATH").unwrap_or_default();
@@ -350,16 +395,28 @@ async fn run_pnpm_install(
     let mut stderr_reader = BufReader::new(stderr).lines();
 
     let w1 = window.clone();
+    let log1 = pnpm_log.clone();
+    let app_dir1 = app_data_dir.clone();
+    let ws1 = ws_path.clone();
     let stdout_task = tokio::spawn(async move {
         while let Ok(Some(line)) = stdout_reader.next_line().await {
-            let _ = w1.emit("env_install_log", line);
+            if let Ok(mut f) = log1.lock() {
+                let _ = writeln!(f, "[stdout] {}", line);
+            }
+            install_log::log_env_install(Some(&w1), app_dir1.as_deref(), Some(&ws1), &line);
         }
     });
 
     let w2 = window.clone();
+    let log2 = pnpm_log.clone();
+    let app_dir2 = app_data_dir.clone();
+    let ws2 = ws_path.clone();
     let stderr_task = tokio::spawn(async move {
         while let Ok(Some(line)) = stderr_reader.next_line().await {
-            let _ = w2.emit("env_install_log", line);
+            if let Ok(mut f) = log2.lock() {
+                let _ = writeln!(f, "[stderr] {}", line);
+            }
+            install_log::log_env_install(Some(&w2), app_dir2.as_deref(), Some(&ws2), &line);
         }
     });
 
@@ -368,10 +425,29 @@ async fn run_pnpm_install(
     let _ = stderr_task.await;
 
     if !status.success() {
-        return Err(format!("pnpm install failed (exit code: {:?})", status.code()));
+        install_log::log_env_install(
+            Some(window),
+            app_data_dir.as_deref(),
+            Some(&ws_path),
+            &format!(
+                "pnpm install failed (exit code: {:?}). See {} for details.",
+                status.code(),
+                pnpm_log_path.to_string_lossy()
+            ),
+        );
+        return Err(format!(
+            "pnpm install failed (exit code: {:?}). See {} for details.",
+            status.code(),
+            pnpm_log_path.to_string_lossy()
+        ));
     }
 
-    let _ = window.emit("env_install_log", "pnpm install completed.".to_string());
+    install_log::log_env_install(
+        Some(window),
+        app_data_dir.as_deref(),
+        Some(&ws_path),
+        "pnpm install completed.",
+    );
     Ok(())
 }
 

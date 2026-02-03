@@ -58,6 +58,7 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
   const [sttTask, setSttTask] = useState<'transcribe' | 'translate'>('transcribe');
   const [sttLogs, setSttLogs] = useState<string[]>([]);
   const [sttProgress, setSttProgress] = useState<string>('');
+  const [sttProgressPercent, setSttProgressPercent] = useState<number | null>(null);
 
   useEffect(() => {
     getVersion()
@@ -97,8 +98,10 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
 
       if (total && percent !== null && total > 0) {
         setSttProgress(`${label}: ${mb(downloaded)} / ${mb(total)} MB (${Math.round(percent)}%)`);
+        setSttProgressPercent(percent);
       } else {
         setSttProgress(`${label}: ${mb(downloaded)} MB`);
+        setSttProgressPercent(null);
       }
     });
     return () => {
@@ -214,6 +217,7 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
     setSttInstalling(true);
     setSttLogs([]);
     setSttProgress('');
+    setSttProgressPercent(null);
     try {
       const s = await invoke<SttStatus>('install_whispercpp', { model: sttModel });
       setStt(s);
@@ -638,7 +642,17 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
             )}
 
             {sttInstalling && sttProgress && (
-              <div className="text-[11px] text-slate-300 font-mono">{sttProgress}</div>
+              <div className="space-y-2">
+                {sttProgressPercent !== null && (
+                  <div className="h-2 bg-slate-800 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-indigo-500 transition-all duration-300 ease-out"
+                      style={{ width: `${Math.max(0, Math.min(100, sttProgressPercent))}%` }}
+                    />
+                  </div>
+                )}
+                <div className="text-[11px] text-slate-300 font-mono">{sttProgress}</div>
+              </div>
             )}
 
             {sttLogs.length > 0 && (

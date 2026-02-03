@@ -12,6 +12,7 @@ mod stt;
 mod sandbox;
 mod toolchain;
 mod maintenance;
+mod install_log;
 
 use std::sync::Mutex;
 use tauri::Manager;
