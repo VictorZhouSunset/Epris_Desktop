@@ -13,6 +13,7 @@ use std::io::Write;
 use crate::install_log;
 use crate::projects;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::AtomicU64;
 
 const BASELINE_NPM_PACKAGES: &[&str] = &[
     // Validation / determinism
@@ -37,6 +38,30 @@ const BASELINE_NPM_PACKAGES: &[&str] = &[
     "d3-array",
     "d3-interpolate",
 ];
+
+fn should_emit_pnpm_line_to_ui(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed.contains("Done in") && trimmed.contains("using pnpm") {
+        return true;
+    }
+    if trimmed.contains("Lockfile is up to date") || trimmed.contains("Already up to date") {
+        return true;
+    }
+
+    // pnpm error/warning markers
+    if trimmed.contains("ERR_PNPM") || trimmed.contains("WARN") || trimmed.contains("deprecated") {
+        return true;
+    }
+    // Common error phrasing (keep last-resort broad match minimal)
+    if trimmed.starts_with("Error:") || trimmed.contains(" mismatch") {
+        return true;
+    }
+
+    false
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EnvironmentStatus {
@@ -772,6 +797,10 @@ async fn run_pnpm_add(
         .map_err(|e| format!("Failed to spawn pnpm add: {}", e))?;
 
     ENV_INSTALL_CURRENT_PID.store(child.id().unwrap_or(0), Ordering::SeqCst);
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let started_at = std::time::Instant::now();
+    let saw_done_line_at_sec = std::sync::Arc::new(AtomicU64::new(0));
+    let force_killed_after_done = std::sync::Arc::new(AtomicBool::new(false));
 
     let stdout = child.stdout.take().ok_or("Failed to capture pnpm stdout (add)")?;
     let stderr = child.stderr.take().ok_or("Failed to capture pnpm stderr (add)")?;
@@ -780,34 +809,73 @@ async fn run_pnpm_add(
 
     let w1 = window.clone();
     let log1 = pnpm_log.clone();
-    let app_dir1 = app_data_dir.clone();
-    let ws1 = ws_path.clone();
+    let saw1 = saw_done_line_at_sec.clone();
     let stdout_task = tokio::spawn(async move {
         while let Ok(Some(line)) = stdout_reader.next_line().await {
+            if line.contains("Done in") && line.contains("using pnpm") {
+                saw1.store(started_at.elapsed().as_secs(), Ordering::SeqCst);
+            }
             if let Ok(mut f) = log1.lock() {
                 let _ = writeln!(f, "[stdout] {}", line);
             }
-            install_log::log_env_install(Some(&w1), app_dir1.as_deref(), Some(&ws1), &line);
+            if should_emit_pnpm_line_to_ui(&line) {
+                let _ = w1.emit("env_install_log", line);
+            }
         }
     });
 
     let w2 = window.clone();
     let log2 = pnpm_log.clone();
-    let app_dir2 = app_data_dir.clone();
-    let ws2 = ws_path.clone();
+    let saw2 = saw_done_line_at_sec.clone();
     let stderr_task = tokio::spawn(async move {
         while let Ok(Some(line)) = stderr_reader.next_line().await {
+            if line.contains("Done in") && line.contains("using pnpm") {
+                saw2.store(started_at.elapsed().as_secs(), Ordering::SeqCst);
+            }
             if let Ok(mut f) = log2.lock() {
                 let _ = writeln!(f, "[stderr] {}", line);
             }
-            install_log::log_env_install(Some(&w2), app_dir2.as_deref(), Some(&ws2), &line);
+            if should_emit_pnpm_line_to_ui(&line) {
+                let _ = w2.emit("env_install_log", line);
+            }
         }
     });
 
+    let done_watch = done.clone();
+    let saw_watch = saw_done_line_at_sec.clone();
+    let killed_watch = force_killed_after_done.clone();
+    let done_hang_watch = tokio::spawn(async move {
+        let mut tick = tokio::time::interval(tokio::time::Duration::from_secs(2));
+        loop {
+            tick.tick().await;
+            if done_watch.load(Ordering::SeqCst) {
+                break;
+            }
+            let saw_at = saw_watch.load(Ordering::SeqCst);
+            if saw_at == 0 {
+                continue;
+            }
+            let now = started_at.elapsed().as_secs();
+            if now.saturating_sub(saw_at) < 20 {
+                continue;
+            }
+            let pid = ENV_INSTALL_CURRENT_PID.load(Ordering::SeqCst);
+            if pid != 0 {
+                kill_pid_tree(pid);
+                killed_watch.store(true, Ordering::SeqCst);
+            }
+            break;
+        }
+    });
+
+    let done_cancel = done.clone();
     let cancel_watch = tokio::spawn(async move {
         let mut tick = tokio::time::interval(tokio::time::Duration::from_millis(250));
         loop {
             tick.tick().await;
+            if done_cancel.load(Ordering::SeqCst) {
+                break;
+            }
             if env_install_canceled() {
                 let pid = ENV_INSTALL_CURRENT_PID.load(Ordering::SeqCst);
                 if pid != 0 {
@@ -820,15 +888,26 @@ async fn run_pnpm_add(
 
     let status = child.wait().await.map_err(|e| e.to_string())?;
     ENV_INSTALL_CURRENT_PID.store(0, Ordering::SeqCst);
+    done.store(true, Ordering::SeqCst);
     let _ = stdout_task.await;
     let _ = stderr_task.await;
     let _ = cancel_watch.await;
+    let _ = done_hang_watch.await;
 
     if env_install_canceled() {
         return Err("Environment install canceled.".to_string());
     }
 
     if !status.success() {
+        if force_killed_after_done.load(Ordering::SeqCst) && saw_done_line_at_sec.load(Ordering::SeqCst) > 0 {
+            install_log::log_env_install(
+                Some(window),
+                app_data_dir.as_deref(),
+                Some(&ws_path),
+                "pnpm add printed Done but did not exit; terminated process tree and continued.",
+            );
+            return Ok(());
+        }
         return Err(format!(
             "pnpm add failed (exit code: {:?}). See {} for details.",
             status.code(),
@@ -911,11 +990,10 @@ async fn run_pnpm_install(
     // Emit periodic progress + log lines so users know the installer is still running.
     let started_at = std::time::Instant::now();
     let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let saw_done_line_at_sec = std::sync::Arc::new(AtomicU64::new(0));
+    let force_killed_after_done = std::sync::Arc::new(AtomicBool::new(false));
     let done_hb = done.clone();
     let w_hb = window.clone();
-    let log_hb = pnpm_log.clone();
-    let app_dir_hb = app_data_dir.clone();
-    let ws_hb = ws_path.clone();
     let heartbeat_task = tokio::spawn(async move {
         let mut tick = tokio::time::interval(tokio::time::Duration::from_secs(8));
         loop {
@@ -925,10 +1003,8 @@ async fn run_pnpm_install(
             }
             let secs = started_at.elapsed().as_secs();
             let line = format!("pnpm install still running ({}s)...", secs);
-            if let Ok(mut f) = log_hb.lock() {
-                let _ = writeln!(f, "[heartbeat] {}", line);
-            }
-            install_log::log_env_install(Some(&w_hb), app_dir_hb.as_deref(), Some(&ws_hb), &line);
+            // UI-only heartbeat: do not write to env-install.log or pnpm-install.log.
+            let _ = w_hb.emit("env_install_log", line.clone());
             let _ = w_hb.emit(
                 "env_install_progress",
                 serde_json::json!({ "step": line, "percent": 60 }),
@@ -943,34 +1019,73 @@ async fn run_pnpm_install(
 
     let w1 = window.clone();
     let log1 = pnpm_log.clone();
-    let app_dir1 = app_data_dir.clone();
-    let ws1 = ws_path.clone();
+    let saw1 = saw_done_line_at_sec.clone();
     let stdout_task = tokio::spawn(async move {
         while let Ok(Some(line)) = stdout_reader.next_line().await {
+            if line.contains("Done in") && line.contains("using pnpm") {
+                saw1.store(started_at.elapsed().as_secs(), Ordering::SeqCst);
+            }
             if let Ok(mut f) = log1.lock() {
                 let _ = writeln!(f, "[stdout] {}", line);
             }
-            install_log::log_env_install(Some(&w1), app_dir1.as_deref(), Some(&ws1), &line);
+            if should_emit_pnpm_line_to_ui(&line) {
+                let _ = w1.emit("env_install_log", line);
+            }
         }
     });
 
     let w2 = window.clone();
     let log2 = pnpm_log.clone();
-    let app_dir2 = app_data_dir.clone();
-    let ws2 = ws_path.clone();
+    let saw2 = saw_done_line_at_sec.clone();
     let stderr_task = tokio::spawn(async move {
         while let Ok(Some(line)) = stderr_reader.next_line().await {
+            if line.contains("Done in") && line.contains("using pnpm") {
+                saw2.store(started_at.elapsed().as_secs(), Ordering::SeqCst);
+            }
             if let Ok(mut f) = log2.lock() {
                 let _ = writeln!(f, "[stderr] {}", line);
             }
-            install_log::log_env_install(Some(&w2), app_dir2.as_deref(), Some(&ws2), &line);
+            if should_emit_pnpm_line_to_ui(&line) {
+                let _ = w2.emit("env_install_log", line);
+            }
         }
     });
 
+    let done_watch = done.clone();
+    let saw_watch = saw_done_line_at_sec.clone();
+    let killed_watch = force_killed_after_done.clone();
+    let done_hang_watch = tokio::spawn(async move {
+        let mut tick = tokio::time::interval(tokio::time::Duration::from_secs(2));
+        loop {
+            tick.tick().await;
+            if done_watch.load(Ordering::SeqCst) {
+                break;
+            }
+            let saw_at = saw_watch.load(Ordering::SeqCst);
+            if saw_at == 0 {
+                continue;
+            }
+            let now = started_at.elapsed().as_secs();
+            if now.saturating_sub(saw_at) < 20 {
+                continue;
+            }
+            let pid = ENV_INSTALL_CURRENT_PID.load(Ordering::SeqCst);
+            if pid != 0 {
+                kill_pid_tree(pid);
+                killed_watch.store(true, Ordering::SeqCst);
+            }
+            break;
+        }
+    });
+
+    let done_cancel = done.clone();
     let cancel_watch = tokio::spawn(async move {
         let mut tick = tokio::time::interval(tokio::time::Duration::from_millis(250));
         loop {
             tick.tick().await;
+            if done_cancel.load(Ordering::SeqCst) {
+                break;
+            }
             if env_install_canceled() {
                 let pid = ENV_INSTALL_CURRENT_PID.load(Ordering::SeqCst);
                 if pid != 0 {
@@ -988,12 +1103,28 @@ async fn run_pnpm_install(
     let _ = stderr_task.await;
     let _ = heartbeat_task.await;
     let _ = cancel_watch.await;
+    let _ = done_hang_watch.await;
 
     if env_install_canceled() {
         return Err("Environment install canceled.".to_string());
     }
 
     if !status.success() {
+        if force_killed_after_done.load(Ordering::SeqCst) && saw_done_line_at_sec.load(Ordering::SeqCst) > 0 {
+            install_log::log_env_install(
+                Some(window),
+                app_data_dir.as_deref(),
+                Some(&ws_path),
+                "pnpm install printed Done but did not exit; terminated process tree and continued.",
+            );
+            install_log::log_env_install(
+                Some(window),
+                app_data_dir.as_deref(),
+                Some(&ws_path),
+                "pnpm install completed.",
+            );
+            return Ok(());
+        }
         // Best-effort: on Windows, we sometimes see `UNKNOWN: unknown error, open ...` with a
         // negative exit code, leaving a partially written node_modules. Repair once by removing
         // node_modules and retrying.
@@ -1038,27 +1169,27 @@ async fn run_pnpm_install(
 
             let w1 = window.clone();
             let log1 = pnpm_log.clone();
-            let app_dir1 = app_data_dir.clone();
-            let ws1 = ws_path.clone();
             let stdout_task = tokio::spawn(async move {
                 while let Ok(Some(line)) = stdout_reader.next_line().await {
                     if let Ok(mut f) = log1.lock() {
                         let _ = writeln!(f, "[retry][stdout] {}", line);
                     }
-                    install_log::log_env_install(Some(&w1), app_dir1.as_deref(), Some(&ws1), &line);
+                    if should_emit_pnpm_line_to_ui(&line) {
+                        let _ = w1.emit("env_install_log", line);
+                    }
                 }
             });
 
             let w2 = window.clone();
             let log2 = pnpm_log.clone();
-            let app_dir2 = app_data_dir.clone();
-            let ws2 = ws_path.clone();
             let stderr_task = tokio::spawn(async move {
                 while let Ok(Some(line)) = stderr_reader.next_line().await {
                     if let Ok(mut f) = log2.lock() {
                         let _ = writeln!(f, "[retry][stderr] {}", line);
                     }
-                    install_log::log_env_install(Some(&w2), app_dir2.as_deref(), Some(&ws2), &line);
+                    if should_emit_pnpm_line_to_ui(&line) {
+                        let _ = w2.emit("env_install_log", line);
+                    }
                 }
             });
 

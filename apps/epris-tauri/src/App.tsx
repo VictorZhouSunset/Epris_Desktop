@@ -42,6 +42,7 @@ function App() {
   const [showAssets, setShowAssets] = useState(false);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [showWizard, setShowWizard] = useState(false);
+  const [wizardDismissed, setWizardDismissed] = useState(false);
   const [isEnvReady, setIsEnvReady] = useState(false);
   const [linkingDeps, setLinkingDeps] = useState(false);
   const [linkingProgress, setLinkingProgress] = useState<{ step: string; percent: number } | null>(null);
@@ -384,12 +385,21 @@ function App() {
   // Check Environment on mount/provider change
   useEffect(() => {
     if (!workspacePath) return;
+    // While the setup wizard is open, let the wizard own environment checks.
+    // Otherwise, this background poll can race the install flow and close/reopen the modal.
+    let canceled = false;
+    if (showWizard) {
+      return () => {
+        canceled = true;
+      };
+    }
     const checkEnv = async () => {
       try {
         const status = await invoke<any>('get_environment_status', {
           provider,
           workspacePath,
         });
+        if (canceled) return;
         const toolchainReady =
           status.node_valid && status.pnpm_valid && status.provider_cli_valid && status.skills_valid;
         const depsReady = Boolean(status.workspace_deps_valid);
@@ -446,6 +456,7 @@ function App() {
         if (ready) {
           setIsEnvReady(true);
           setShowWizard(false);
+          setWizardDismissed(false);
           setLinkingDeps(false);
           void maybePromptBaselinePackages(true);
           return;
@@ -474,18 +485,26 @@ function App() {
         }
 
         setIsEnvReady(false);
-        setShowWizard(true);
+        if (wizardDismissed) {
+          setShowWizard(false);
+        } else {
+          setShowWizard(true);
+        }
       } catch (e) {
         console.error('Failed to check env:', e);
       }
     };
     checkEnv();
-  }, [workspacePath, provider]);
+    return () => {
+      canceled = true;
+    };
+  }, [workspacePath, provider, wizardDismissed, showWizard]);
 
   // Step 13: default provider when opening a project
   useEffect(() => {
     setIsEnvReady(false);
     setShowWizard(false);
+    setWizardDismissed(false);
     setLinkingDeps(false);
     setLinkingProgress(null);
     linkingForWorkspaceRef.current = '';
@@ -1268,11 +1287,16 @@ function App() {
         <FirstRunWizard
           workspacePath={workspacePath}
           provider={provider}
+          requestedPackages={missingPackages}
           onComplete={() => {
             setShowWizard(false);
+            setWizardDismissed(false);
             setIsEnvReady(true);
           }}
-          onClose={() => setShowWizard(false)}
+          onClose={() => {
+            setShowWizard(false);
+            setWizardDismissed(true);
+          }}
         />
       )}
 
@@ -1375,6 +1399,19 @@ function App() {
           </span>
         </div>
         <div className="flex items-center gap-4">
+          {!isEnvReady && workspacePath && !showWizard && !linkingDeps && (
+            <button
+              onClick={() => {
+                setWizardDismissed(false);
+                setShowWizard(true);
+              }}
+              className="hidden lg:flex items-center gap-2 px-3 py-2 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-200 hover:bg-amber-500/15 transition-colors"
+              title="Open environment setup"
+            >
+              <span className="text-[11px] font-black uppercase tracking-widest">Setup</span>
+              <span className="text-xs font-bold">Install missing deps</span>
+            </button>
+          )}
           {linkingDeps && linkingProgress && (
             <span className="hidden lg:flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-800/40 border border-slate-700 text-slate-200 max-w-[420px]">
               <span className="text-[11px] font-black uppercase tracking-widest text-slate-400">Deps</span>
