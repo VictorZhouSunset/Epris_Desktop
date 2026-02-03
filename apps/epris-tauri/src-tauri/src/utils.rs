@@ -1,4 +1,6 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(any(test, debug_assertions))]
+use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::net::TcpListener;
 

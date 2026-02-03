@@ -342,7 +342,7 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
         failed: { path: string; error: string }[];
         projects_deleted: number;
         restart_required: boolean;
-      }>('RESET_USER_DATA', { deleteProjects: resetAlsoDeleteProjects });
+      }>('RESET_USER_DATA', { payload: { deleteProjects: resetAlsoDeleteProjects } });
 
       const failed = res.failed?.length ? `\n\nFailed:\n${res.failed.map((f) => `- ${f.path}: ${f.error}`).join('\n')}` : '';
       alert(

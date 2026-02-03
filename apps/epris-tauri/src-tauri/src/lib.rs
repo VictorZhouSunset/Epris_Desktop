@@ -305,6 +305,7 @@ pub fn run() {
             environment::link_workspace_dependencies,
             environment::get_baseline_packages_info,
             environment::install_baseline_packages,
+            environment::cancel_env_install,
             environment::get_gemini_auth_status,
             environment::open_gemini_login,
             environment::set_gemini_api_key,

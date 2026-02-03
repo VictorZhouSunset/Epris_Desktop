@@ -1272,6 +1272,7 @@ function App() {
             setShowWizard(false);
             setIsEnvReady(true);
           }}
+          onClose={() => setShowWizard(false)}
         />
       )}
 
@@ -1317,6 +1318,14 @@ function App() {
               </div>
             )}
             <div className="mt-5 flex items-center justify-end gap-3">
+              <button
+                onClick={() => setShowDependencyModal(false)}
+                disabled={isInstallingMissingPackages}
+                className="px-4 py-2 rounded-xl bg-slate-800/40 border border-slate-700 text-slate-200 font-bold hover:bg-slate-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                title="Skip for now"
+              >
+                Skip for now
+              </button>
               <button
                 onClick={async () => {
                   await handleRevertPreFlight({ skipConfirm: true });
@@ -1382,6 +1391,16 @@ function App() {
                 {Math.round(linkingProgress.percent)}%
               </div>
             </span>
+          )}
+          {gateFailed && missingPackages.length > 0 && !isProcessing && !showDependencyModal && (
+            <button
+              onClick={() => setShowDependencyModal(true)}
+              className="hidden lg:flex items-center gap-2 px-3 py-2 rounded-xl bg-indigo-600/20 border border-indigo-500/30 text-indigo-200 hover:bg-indigo-600/25 transition-colors"
+              title="Install missing packages for the generated code"
+            >
+              <span className="text-[11px] font-black uppercase tracking-widest">Deps</span>
+              <span className="text-xs font-bold">Install Missing ({missingPackages.length})</span>
+            </button>
           )}
           {lastResponse?.gate_result && (
             <span

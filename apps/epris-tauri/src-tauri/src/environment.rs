@@ -12,6 +12,7 @@ use crate::toolchain;
 use std::io::Write;
 use crate::install_log;
 use crate::projects;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 const BASELINE_NPM_PACKAGES: &[&str] = &[
     // Validation / determinism
@@ -64,6 +65,48 @@ pub struct BaselinePackagesInstallResult {
 
 pub struct EnvironmentManager {
     pub toolchain_dir: PathBuf,
+}
+
+static ENV_INSTALL_CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
+static ENV_INSTALL_CURRENT_PID: AtomicU32 = AtomicU32::new(0);
+
+fn kill_pid_tree(pid: u32) {
+    if pid == 0 {
+        return;
+    }
+    println!("[Epris] Killing EnvInstall process tree for PID: {}", pid);
+
+    #[cfg(target_os = "windows")]
+    {
+        #[cfg(target_os = "windows")]
+        use std::os::windows::process::CommandExt;
+
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .status();
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .status();
+    }
+}
+
+fn env_install_canceled() -> bool {
+    ENV_INSTALL_CANCEL_REQUESTED.load(Ordering::SeqCst)
+}
+
+#[tauri::command]
+pub fn cancel_env_install() -> Result<(), String> {
+    ENV_INSTALL_CANCEL_REQUESTED.store(true, Ordering::SeqCst);
+    let pid = ENV_INSTALL_CURRENT_PID.swap(0, Ordering::SeqCst);
+    if pid != 0 {
+        kill_pid_tree(pid);
+    }
+    Ok(())
 }
 
 impl EnvironmentManager {
@@ -321,6 +364,10 @@ pub async fn install_missing_dependencies(
 ) -> Result<(), String> {
     println!("[Epris] Installing dependencies for {} in {}...", provider, workspace_path);
 
+    // New run: clear any previous cancel request.
+    ENV_INSTALL_CANCEL_REQUESTED.store(false, Ordering::SeqCst);
+    ENV_INSTALL_CURRENT_PID.store(0, Ordering::SeqCst);
+
     let app_dir = window
         .app_handle()
         .path()
@@ -346,6 +393,15 @@ pub async fn install_missing_dependencies(
     ];
 
     for (step, percent) in stages {
+        if env_install_canceled() {
+            install_log::log_env_install(
+                Some(&window),
+                Some(&app_dir),
+                Some(&ws_path),
+                "Environment install canceled.",
+            );
+            return Err("Environment install canceled.".to_string());
+        }
         let _ = window.emit("env_install_progress", serde_json::json!({
             "step": step,
             "percent": percent
@@ -358,8 +414,23 @@ pub async fn install_missing_dependencies(
         );
 
         if step == "Bootstrapping workspace" {
-            let env_manager = EnvironmentManager::new(app_dir.clone());
-            run_pnpm_install(&window, &workspace_path, &env_manager).await?;
+            // If node_modules already exists, we can skip pnpm install here.
+            // This keeps “Install missing dep” fast when only skills are missing.
+            let ws_path = std::path::PathBuf::from(&workspace_path);
+            let deps_ok = ws_path.join("node_modules").join(".pnpm").exists()
+                || ws_path.join("node_modules").join(".bin").exists()
+                || ws_path.join("node_modules").exists();
+            if deps_ok {
+                install_log::log_env_install(
+                    Some(&window),
+                    Some(&app_dir),
+                    Some(&ws_path),
+                    "Bootstrapping workspace: skipped (node_modules already present).",
+                );
+            } else {
+                let env_manager = EnvironmentManager::new(app_dir.clone());
+                run_pnpm_install(&window, &workspace_path, &env_manager).await?;
+            }
         }
 
         if step == "Installing baseline packages" {
@@ -700,6 +771,8 @@ async fn run_pnpm_add(
         .spawn()
         .map_err(|e| format!("Failed to spawn pnpm add: {}", e))?;
 
+    ENV_INSTALL_CURRENT_PID.store(child.id().unwrap_or(0), Ordering::SeqCst);
+
     let stdout = child.stdout.take().ok_or("Failed to capture pnpm stdout (add)")?;
     let stderr = child.stderr.take().ok_or("Failed to capture pnpm stderr (add)")?;
     let mut stdout_reader = BufReader::new(stdout).lines();
@@ -731,9 +804,29 @@ async fn run_pnpm_add(
         }
     });
 
+    let cancel_watch = tokio::spawn(async move {
+        let mut tick = tokio::time::interval(tokio::time::Duration::from_millis(250));
+        loop {
+            tick.tick().await;
+            if env_install_canceled() {
+                let pid = ENV_INSTALL_CURRENT_PID.load(Ordering::SeqCst);
+                if pid != 0 {
+                    kill_pid_tree(pid);
+                }
+                break;
+            }
+        }
+    });
+
     let status = child.wait().await.map_err(|e| e.to_string())?;
+    ENV_INSTALL_CURRENT_PID.store(0, Ordering::SeqCst);
     let _ = stdout_task.await;
     let _ = stderr_task.await;
+    let _ = cancel_watch.await;
+
+    if env_install_canceled() {
+        return Err("Environment install canceled.".to_string());
+    }
 
     if !status.success() {
         return Err(format!(
@@ -799,6 +892,8 @@ async fn run_pnpm_install(
             "install",
             "--frozen-lockfile",
             "--prefer-offline",
+            "--reporter",
+            "append-only",
             "--store-dir",
             &store_dir_arg,
         ],
@@ -809,6 +904,37 @@ async fn run_pnpm_install(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("Failed to spawn pnpm install: {}", e))?;
+
+    ENV_INSTALL_CURRENT_PID.store(child.id().unwrap_or(0), Ordering::SeqCst);
+
+    // Heartbeat: pnpm can appear "stuck" while doing filesystem work (especially on Windows).
+    // Emit periodic progress + log lines so users know the installer is still running.
+    let started_at = std::time::Instant::now();
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let done_hb = done.clone();
+    let w_hb = window.clone();
+    let log_hb = pnpm_log.clone();
+    let app_dir_hb = app_data_dir.clone();
+    let ws_hb = ws_path.clone();
+    let heartbeat_task = tokio::spawn(async move {
+        let mut tick = tokio::time::interval(tokio::time::Duration::from_secs(8));
+        loop {
+            tick.tick().await;
+            if done_hb.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            let secs = started_at.elapsed().as_secs();
+            let line = format!("pnpm install still running ({}s)...", secs);
+            if let Ok(mut f) = log_hb.lock() {
+                let _ = writeln!(f, "[heartbeat] {}", line);
+            }
+            install_log::log_env_install(Some(&w_hb), app_dir_hb.as_deref(), Some(&ws_hb), &line);
+            let _ = w_hb.emit(
+                "env_install_progress",
+                serde_json::json!({ "step": line, "percent": 60 }),
+            );
+        }
+    });
 
     let stdout = child.stdout.take().ok_or("Failed to capture pnpm stdout")?;
     let stderr = child.stderr.take().ok_or("Failed to capture pnpm stderr")?;
@@ -841,9 +967,31 @@ async fn run_pnpm_install(
         }
     });
 
+    let cancel_watch = tokio::spawn(async move {
+        let mut tick = tokio::time::interval(tokio::time::Duration::from_millis(250));
+        loop {
+            tick.tick().await;
+            if env_install_canceled() {
+                let pid = ENV_INSTALL_CURRENT_PID.load(Ordering::SeqCst);
+                if pid != 0 {
+                    kill_pid_tree(pid);
+                }
+                break;
+            }
+        }
+    });
+
     let status = child.wait().await.map_err(|e| e.to_string())?;
+    ENV_INSTALL_CURRENT_PID.store(0, Ordering::SeqCst);
+    done.store(true, std::sync::atomic::Ordering::SeqCst);
     let _ = stdout_task.await;
     let _ = stderr_task.await;
+    let _ = heartbeat_task.await;
+    let _ = cancel_watch.await;
+
+    if env_install_canceled() {
+        return Err("Environment install canceled.".to_string());
+    }
 
     if !status.success() {
         // Best-effort: on Windows, we sometimes see `UNKNOWN: unknown error, open ...` with a

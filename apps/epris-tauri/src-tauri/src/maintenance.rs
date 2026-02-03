@@ -54,8 +54,11 @@ fn remove_file_best_effort(path: &Path, deleted: &mut Vec<String>, failed: &mut 
 #[tauri::command]
 pub fn reset_user_data(
     app_handle: tauri::AppHandle,
-    payload: ResetUserDataPayload,
+    payload: Option<ResetUserDataPayload>,
 ) -> Result<ResetUserDataResult, String> {
+    let payload = payload.unwrap_or(ResetUserDataPayload {
+        delete_projects: false,
+    });
     let app_dir = app_handle
         .path()
         .app_local_data_dir()

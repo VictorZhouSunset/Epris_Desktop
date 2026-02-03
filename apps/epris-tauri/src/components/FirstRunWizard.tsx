@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { RefreshCw, Check, AlertTriangle, Loader2, Download } from 'lucide-react';
+import { RefreshCw, Check, AlertTriangle, Loader2, Download, X } from 'lucide-react';
 import type { SttStatus } from '../types/backend';
 
 interface EnvironmentStatus {
@@ -22,9 +22,10 @@ interface FirstRunWizardProps {
   workspacePath?: string;
   provider: string; // 'opencode' | 'gemini'
   onComplete: () => void;
+  onClose?: () => void;
 }
 
-export function FirstRunWizard({ workspacePath, provider, onComplete }: FirstRunWizardProps) {
+export function FirstRunWizard({ workspacePath, provider, onComplete, onClose }: FirstRunWizardProps) {
   const [status, setStatus] = useState<EnvironmentStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [installing, setInstalling] = useState(false);
@@ -138,6 +139,15 @@ export function FirstRunWizard({ workspacePath, provider, onComplete }: FirstRun
     }
   }, [workspacePath, provider, checkEnv]);
 
+  const handleCancelInstall = useCallback(async () => {
+    try {
+      await invoke('cancel_env_install');
+    } catch {}
+    setInstalling(false);
+    setProgress(null);
+    setError('Canceled.');
+  }, []);
+
   const handleInstallStt = async () => {
     setSttInstalling(true);
     setSttLogs([]);
@@ -177,7 +187,8 @@ export function FirstRunWizard({ workspacePath, provider, onComplete }: FirstRun
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/90 backdrop-blur-sm p-4">
       <div className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
         {/* Header */}
-        <div className="p-6 border-b border-slate-800 bg-slate-900">
+        <div className="p-6 border-b border-slate-800 bg-slate-900 flex items-start justify-between gap-4">
+          <div>
           <h2 className="text-xl font-bold text-white flex items-center gap-2">
             <Download className="text-indigo-400" />
             Environment Setup
@@ -185,6 +196,17 @@ export function FirstRunWizard({ workspacePath, provider, onComplete }: FirstRun
           <p className="text-slate-400 text-sm mt-1">
             We need to install some local dependencies for {provider} and Remotion.
           </p>
+          </div>
+          {onClose && (
+            <button
+              onClick={() => onClose()}
+              className="p-2 rounded-xl hover:bg-slate-800/60 text-slate-400 hover:text-slate-200 transition-colors"
+              title="Close"
+              disabled={installing}
+            >
+              <X size={18} />
+            </button>
+          )}
         </div>
 
         {/* Status List */}
@@ -230,6 +252,16 @@ export function FirstRunWizard({ workspacePath, provider, onComplete }: FirstRun
                     <div key={i} className="whitespace-pre-wrap font-mono">{line}</div>
                   ))
                 )}
+              </div>
+
+              <div className="flex items-center justify-end gap-3">
+                <button
+                  onClick={handleCancelInstall}
+                  className="px-4 py-2 rounded-xl bg-slate-900/50 border border-slate-700 text-slate-200 font-bold hover:bg-slate-900 transition-colors"
+                  title="Stop installation"
+                >
+                  Cancel install
+                </button>
               </div>
             </div>
           )}

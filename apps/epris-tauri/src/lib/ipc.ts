@@ -47,6 +47,7 @@ export const TAURI_COMMANDS = {
   INSTALL_JS_PACKAGES: 'install_js_packages',
   GET_BASELINE_PACKAGES_INFO: 'get_baseline_packages_info',
   INSTALL_BASELINE_PACKAGES: 'install_baseline_packages',
+  CANCEL_ENV_INSTALL: 'cancel_env_install',
   RESET_USER_DATA: 'reset_user_data',
   SET_DEBUG_FORCE_DEPENDENCY_REQUEST: 'set_debug_force_dependency_request',
   SET_BASELINE_PACKAGES_ACK: 'set_baseline_packages_ack',
