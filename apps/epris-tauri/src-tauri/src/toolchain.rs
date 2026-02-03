@@ -8,6 +8,8 @@ use crate::utils;
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "windows")]
 use tauri::Emitter;
+#[cfg(target_os = "windows")]
+use tauri::Manager;
 
 #[cfg(target_os = "windows")]
 const PINNED_NODE_VERSION: &str = "24.13.0";
@@ -441,20 +443,19 @@ fn move_dir_contents(src_dir: &Path, dst_dir: &Path) -> Result<(), String> {
                 let _ = std::fs::remove_file(&dst);
             }
         }
-        std::fs::rename(&src, &dst).or_else(|_| {
-            if src.is_dir() {
-                std::fs::create_dir_all(&dst).map_err(|e| e.to_string())?;
-                let mut options = fs_extra::dir::CopyOptions::new();
-                options.copy_inside = true;
-                fs_extra::dir::copy(&src, &dst, &options).map_err(|e| e.to_string())?;
-                let _ = std::fs::remove_dir_all(&src);
-                Ok(())
-            } else {
-                std::fs::copy(&src, &dst).map_err(|e| e.to_string())?;
-                let _ = std::fs::remove_file(&src);
-                Ok(())
-            }
-        })?;
+        if std::fs::rename(&src, &dst).is_ok() {
+            continue;
+        }
+        if src.is_dir() {
+            std::fs::create_dir_all(&dst).map_err(|e| e.to_string())?;
+            let mut options = fs_extra::dir::CopyOptions::new();
+            options.copy_inside = true;
+            fs_extra::dir::copy(&src, &dst, &options).map_err(|e| e.to_string())?;
+            let _ = std::fs::remove_dir_all(&src);
+        } else {
+            std::fs::copy(&src, &dst).map_err(|e| e.to_string())?;
+            let _ = std::fs::remove_file(&src);
+        }
     }
     Ok(())
 }
