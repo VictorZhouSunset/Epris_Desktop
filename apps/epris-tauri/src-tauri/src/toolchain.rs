@@ -29,7 +29,7 @@ const NODE_WIN_X64_ZIP_URL: &str =
 // SHA256 for node-v24.13.0-win-x64.zip (from SHASUMS256.txt).
 #[cfg(target_os = "windows")]
 const NODE_WIN_X64_ZIP_SHA256: &str =
-    "1a5f0cd914386f3be2fbaf03ad9fff808a588ce50d2e155f338fad5530575f18";
+    "ca2742695be8de44027d71b3f53a4bdb36009b95575fe1ae6f7f0b5ce091cb88";
 
 #[cfg(not(target_os = "windows"))]
 pub async fn ensure_local_toolchain(
@@ -386,6 +386,8 @@ fn verify_sha256(path: &Path, expected_hex: &str) -> Result<(), String> {
     hasher.update(&bytes);
     let got = hex::encode(hasher.finalize());
     if got.to_ascii_lowercase() != expected_hex.to_ascii_lowercase() {
+        // Best-effort cleanup so the next run can re-download.
+        let _ = std::fs::remove_file(path);
         return Err(format!(
             "SHA256 mismatch for {}: got {}, expected {}",
             path.to_string_lossy(),
