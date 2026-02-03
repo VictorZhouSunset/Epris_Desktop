@@ -893,26 +893,6 @@ function App() {
 
           {gateFailed && !isProcessing && missingPackages.length === 0 && (
             <div className="hidden lg:flex items-center gap-2">
-              {missingPackages.length > 0 && (
-                <button
-                  onClick={handleInstallMissingPackages}
-                  className="flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-800/40 border border-slate-700 text-slate-200 hover:bg-slate-800 transition-colors"
-                  title="Install packages required by the generated code"
-                >
-                  <span className="text-xs font-black uppercase tracking-widest">Deps</span>
-                  <span className="text-xs font-bold">Install Missing ({missingPackages.length})</span>
-                </button>
-              )}
-              {missingPackages.length > 0 && (
-                <button
-                  onClick={handleRevertPreFlight}
-                  className="flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-900/50 border border-slate-700 text-slate-300 hover:bg-slate-900 transition-colors"
-                  title="Discard the last AI changes"
-                >
-                  <span className="text-xs font-black uppercase tracking-widest">Revert</span>
-                  <span className="text-xs font-bold">Pre-prompt</span>
-                </button>
-              )}
               <button
                 onClick={handleFixGateError}
                 className="flex items-center gap-2 px-3 py-2 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-300 hover:bg-amber-500/15 transition-colors"
