@@ -119,7 +119,7 @@ export function FirstRunWizard({ workspacePath, provider, onComplete }: FirstRun
     };
   }, []);
 
-  const handleInstall = async () => {
+  const handleInstall = useCallback(async () => {
     if (!workspacePath) return;
     setInstalling(true);
     setLogs([]);
@@ -136,7 +136,7 @@ export function FirstRunWizard({ workspacePath, provider, onComplete }: FirstRun
       setInstalling(false);
       setProgress(null);
     }
-  };
+  }, [workspacePath, provider, checkEnv]);
 
   const handleInstallStt = async () => {
     setSttInstalling(true);

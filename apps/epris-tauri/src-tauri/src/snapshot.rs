@@ -227,6 +227,11 @@ pub fn restore_backup(workspace_path: &str, backup_name: &str) -> Result<(), Str
 }
 
 #[tauri::command]
+pub fn restore_pre_flight_backup(workspace_path: String) -> Result<(), String> {
+    restore_backup(&workspace_path, "pre_flight")
+}
+
+#[tauri::command]
 pub fn clear_snapshot_history(workspace_path: String) -> Result<(), String> {
     let history_dir = Path::new(&workspace_path).join(".epris/history");
     if history_dir.exists() {

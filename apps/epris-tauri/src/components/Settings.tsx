@@ -60,6 +60,8 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
   const [sttProgress, setSttProgress] = useState<string>('');
   const [sttProgressPercent, setSttProgressPercent] = useState<number | null>(null);
 
+  const [debugForceDepReq, setDebugForceDepReq] = useState<string>('');
+
   useEffect(() => {
     getVersion()
       .then((v) => setAppVersion(v))
@@ -80,6 +82,7 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
       checkAuth();
     }
     checkEnvironment();
+    checkAppState();
     checkProjectsRoot();
     checkStt();
   }, [currentProvider]);
@@ -130,6 +133,15 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
       console.error('Failed to check environment:', e);
     } finally {
       setCheckingEnv(false);
+    }
+  };
+
+  const checkAppState = async () => {
+    try {
+      const state = await IpcService.call<any>('GET_APP_STATE');
+      setDebugForceDepReq(String(state?.debug_force_dependency_request || ''));
+    } catch (e) {
+      console.error('Failed to read app state:', e);
     }
   };
 
@@ -226,6 +238,19 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
       alert('Voice-to-Text installation failed: ' + (e instanceof Error ? e.message : String(e)));
     } finally {
       setSttInstalling(false);
+    }
+  };
+
+  const handleApplyDebugForceDepReq = async () => {
+    try {
+      const v = debugForceDepReq.trim();
+      await IpcService.call<void>('SET_DEBUG_FORCE_DEPENDENCY_REQUEST', {
+        value: v.length ? v : null,
+      });
+      await checkAppState();
+      alert('Debug flag updated.');
+    } catch (e) {
+      alert(`Failed: ${e instanceof Error ? e.message : String(e)}`);
     }
   };
 
@@ -462,6 +487,31 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
 
             <div className="text-[11px] text-slate-500">
               Clears local toolchain, logs, cache, and state. Restart required.
+            </div>
+          </div>
+
+          {/* Debug */}
+          <div className="p-4 bg-slate-800/30 rounded-xl border border-slate-700 space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-medium text-slate-300">Debug</span>
+              <span className="text-[11px] text-slate-500">Testing tools</span>
+            </div>
+            <div className="text-[11px] text-slate-500">
+              Force Gate to emit a dependency request (e.g. to test the install prompt UI). Leave empty to disable.
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                value={debugForceDepReq}
+                onChange={(e) => setDebugForceDepReq(e.target.value)}
+                placeholder="e.g. simplex-noise"
+                className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 font-mono"
+              />
+              <button
+                onClick={() => void handleApplyDebugForceDepReq()}
+                className="px-3 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg text-xs font-bold text-slate-200 transition-colors"
+              >
+                Apply
+              </button>
             </div>
           </div>
 

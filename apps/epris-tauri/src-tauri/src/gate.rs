@@ -4,7 +4,10 @@ use std::io::Write;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use crate::utils;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
+use crate::state_manager::StateManager;
+use std::collections::BTreeSet;
+use walkdir::WalkDir;
 
 static GATE_CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
 static GATE_CURRENT_PID: AtomicU32 = AtomicU32::new(0);
@@ -117,6 +120,35 @@ pub async fn run_gate_with_mode(
         duration_smoke_mid_sec: 0.0,
         total_duration_sec: 0.0,
     };
+
+    // Fast dependency check: if code imports packages not listed in package.json, request them
+    // before running typecheck/smoke tests.
+    if let Ok(missing) = detect_missing_imported_packages(&workspace_path) {
+        if !missing.is_empty() {
+            result.error_output = format!("DEPENDENCY_REQUEST: {}", missing.join(", "));
+            result.error = Some(result.error_output.clone());
+            result.total_duration_sec = gate_start.elapsed().as_secs_f64();
+            log_gate_result(&workspace_path, &result);
+            return Ok(result);
+        }
+    }
+
+    // Debug-only hook: force a dependency request without running Gate.
+    if let Some(h) = app_handle {
+        if let Ok(app_dir) = h.path().app_local_data_dir() {
+            let mgr = StateManager::new(app_dir);
+            if let Some(req) = mgr.read().debug_force_dependency_request {
+                let req = req.trim().to_string();
+                if !req.is_empty() {
+                    result.error_output = format!("DEPENDENCY_REQUEST: {}", req);
+                    result.error = Some(result.error_output.clone());
+                    result.total_duration_sec = gate_start.elapsed().as_secs_f64();
+                    log_gate_result(&workspace_path, &result);
+                    return Ok(result);
+                }
+            }
+        }
+    }
 
     let canceled = || GATE_CANCEL_REQUESTED.load(Ordering::SeqCst);
     let set_progress = |percent: f64, step: &str| {
@@ -267,6 +299,129 @@ pub async fn run_gate_with_mode(
     result.total_duration_sec = gate_start.elapsed().as_secs_f64();
     log_gate_result(&workspace_path, &result);
     Ok(result)
+}
+
+fn detect_missing_imported_packages(workspace_path: &str) -> Result<Vec<String>, String> {
+    let declared = read_declared_packages(workspace_path)?;
+    let imported = scan_imported_packages(workspace_path);
+
+    // Common Node built-ins which don't appear in package.json.
+    let builtins: BTreeSet<&'static str> = [
+        "assert", "buffer", "child_process", "crypto", "events", "fs", "http", "https", "os",
+        "path", "stream", "timers", "url", "util",
+    ]
+    .into_iter()
+    .collect();
+
+    let mut missing: Vec<String> = Vec::new();
+    for pkg in imported {
+        if pkg.starts_with("node:") {
+            continue;
+        }
+        if builtins.contains(pkg.as_str()) {
+            continue;
+        }
+        if !declared.contains(&pkg) {
+            missing.push(pkg);
+        }
+    }
+    missing.sort();
+    missing.dedup();
+    Ok(missing)
+}
+
+fn read_declared_packages(workspace_path: &str) -> Result<BTreeSet<String>, String> {
+    let pkg_path = std::path::Path::new(workspace_path).join("package.json");
+    if !pkg_path.exists() {
+        return Ok(BTreeSet::new());
+    }
+    let bytes = std::fs::read(&pkg_path).map_err(|e| e.to_string())?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let mut out: BTreeSet<String> = BTreeSet::new();
+    for key in ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"] {
+        if let Some(obj) = v.get(key).and_then(|x| x.as_object()) {
+            for (k, _) in obj.iter() {
+                out.insert(k.to_string());
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn scan_imported_packages(workspace_path: &str) -> BTreeSet<String> {
+    let src_dir = std::path::Path::new(workspace_path).join("src");
+    if !src_dir.exists() {
+        return BTreeSet::new();
+    }
+
+    let mut out: BTreeSet<String> = BTreeSet::new();
+    for entry in WalkDir::new(src_dir).follow_links(false).into_iter().filter_map(Result::ok) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let p = entry.path();
+        let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if ext != "ts" && ext != "tsx" && ext != "js" && ext != "jsx" {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(p) else { continue };
+        extract_import_specs(&content, &mut out);
+    }
+    out
+}
+
+fn extract_import_specs(content: &str, out: &mut BTreeSet<String>) {
+    // Extremely small parser: catches common forms
+    // - import ... from 'x'
+    // - export ... from 'x'
+    // - require('x')
+    // - import('x')
+    for marker in ["from '", "from \""] {
+        for (idx, _) in content.match_indices(marker) {
+            let start = idx + marker.len();
+            let quote = if marker.ends_with('\'') { '\'' } else { '"' };
+            if let Some(end) = content[start..].find(quote) {
+                let spec = &content[start..start + end];
+                push_pkg_from_spec(spec, out);
+            }
+        }
+    }
+
+    for marker in ["require('", "require(\"", "import('", "import(\""] {
+        for (idx, _) in content.match_indices(marker) {
+            let start = idx + marker.len();
+            let quote = if marker.ends_with('\'') { '\'' } else { '"' };
+            if let Some(end) = content[start..].find(quote) {
+                let spec = &content[start..start + end];
+                push_pkg_from_spec(spec, out);
+            }
+        }
+    }
+}
+
+fn push_pkg_from_spec(spec: &str, out: &mut BTreeSet<String>) {
+    let s = spec.trim();
+    if s.is_empty() {
+        return;
+    }
+    if s.starts_with('.') || s.starts_with('/') || s.contains('\\') {
+        return;
+    }
+    let pkg = if s.starts_with('@') {
+        let mut it = s.split('/');
+        let a = it.next().unwrap_or("");
+        let b = it.next().unwrap_or("");
+        if a.is_empty() || b.is_empty() {
+            return;
+        }
+        format!("{}/{}", a, b)
+    } else {
+        s.split('/').next().unwrap_or("").to_string()
+    };
+    if pkg.is_empty() {
+        return;
+    }
+    out.insert(pkg);
 }
 
 pub fn log_gate_result(workspace_path: &str, result: &GateResult) {

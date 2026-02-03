@@ -178,6 +178,13 @@ impl ProviderManager {
             let rules = "# Remotion Minimal Rules\n\n\
                 ## Goal\n\n\
                 Enable fast, safe Remotion video generation for an initial version. Prioritize simplicity and successful rendering over architectural completeness.\n\n\
+                ## Dependency Policy (Important)\n\n\
+                - DO NOT install npm packages automatically.\n\
+                - DO NOT run pnpm/npm/yarn/bun.\n\
+                - DO NOT modify package.json or pnpm-lock.yaml.\n\
+                - If you need a dependency, ask the user to install it (e.g. \"Please install: <package>\").\n\
+                - If the user explicitly requests a specific npm package, you MUST use it via import.\n\
+                  Do NOT re-implement it or switch libraries to avoid the dependency; instead request it.\n\n\
                 ## 1. Scope\n\n\
                 - Only modify files inside `src/**` and `public/**`.\n\
                 - All images, audio, and fonts must live in `public/` and be referenced with `staticFile()`.\n\
@@ -228,13 +235,14 @@ impl ProviderManager {
                     "name": "gemini-3-flash-preview"
                 },
                 "context": {
-                    "fileName": ["REMOTION.md"]
+                    "fileName": ["REMOTION.md", "package.json"]
                 },
                 "experimental": {
                     "skills": true
                 },
-                "toolExecution": {
-                    "run_shell_command": "auto_accept"
+                "tools": {
+                    "approvalMode": "auto_edit",
+                    "autoAccept": false
                 }
             });
             let content = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
@@ -244,7 +252,7 @@ impl ProviderManager {
         // OpenCode Official Config
         if !opencode_config.exists() {
             let config = serde_json::json!({
-                "instructions": ["REMOTION.md"]
+                "instructions": ["REMOTION.md", "package.json"]
             });
             let content = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
             std::fs::write(&opencode_config, content).map_err(|e| e.to_string())?;

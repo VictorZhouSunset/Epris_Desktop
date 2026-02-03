@@ -61,6 +61,19 @@ fn ensure_embedded_template_dir(app_handle: &tauri::AppHandle) -> Result<PathBuf
     Ok(template_dir)
 }
 
+pub fn get_mutable_template_dir(app_handle: &tauri::AppHandle) -> Result<Option<PathBuf>, String> {
+    #[cfg(any(test, not(debug_assertions)))]
+    {
+        return ensure_embedded_template_dir(app_handle).map(Some);
+    }
+
+    #[cfg(all(not(test), debug_assertions))]
+    {
+        let _ = app_handle;
+        return Ok(None);
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ProjectInfo {
     pub id: String,
@@ -133,32 +146,10 @@ fn resolve_template_dir(app_handle: &tauri::AppHandle) -> Result<PathBuf, String
 
     #[cfg(not(debug_assertions))]
     {
-        let template = app_handle
-            .path()
-            .resolve("workspace-template", tauri::path::BaseDirectory::Resource)
-            .map_err(|e| format!("Failed to resolve resource 'workspace-template': {}", e))?;
-        if template.exists() && template.is_dir() {
-            return Ok(template);
-        }
-
-        let resource_dir = app_handle
-            .path()
-            .resource_dir()
-            .map_err(|e| format!("Failed to get resource_dir: {}", e))?;
-
-        if let Some(found) = find_template_dir_in_resource_dir(&resource_dir) {
-            return Ok(found);
-        }
-
-        match ensure_embedded_template_dir(app_handle) {
-            Ok(extracted) => Ok(extracted),
-            Err(extract_err) => Err(format!(
-                "Template directory not found. Resolved path: {}. resource_dir: {}. embedded_extract_error: {}",
-                template.to_string_lossy(),
-                resource_dir.to_string_lossy(),
-                extract_err
-            )),
-        }
+        // Always use an app-local, writable template directory extracted from the embedded
+        // workspace template. This avoids relying on platform resource directories (which can be
+        // read-only) and enables one-time “baseline dependency” seeding for future projects.
+        ensure_embedded_template_dir(app_handle)
     }
 }
 

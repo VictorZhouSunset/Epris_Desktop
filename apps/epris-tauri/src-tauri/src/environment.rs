@@ -11,6 +11,31 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use crate::toolchain;
 use std::io::Write;
 use crate::install_log;
+use crate::projects;
+
+const BASELINE_NPM_PACKAGES: &[&str] = &[
+    // Validation / determinism
+    "zod",
+    "seedrandom",
+    // LaTeX / math rendering
+    "katex",
+    "react-katex",
+    // Easing / curves
+    "d3-ease",
+    "bezier-easing",
+    // Noise / natural motion
+    "simplex-noise",
+    // Color utilities
+    "culori",
+    // SVG path + morph
+    "svg-path-properties",
+    "flubber",
+    // Charts (D3 route)
+    "d3-scale",
+    "d3-shape",
+    "d3-array",
+    "d3-interpolate",
+];
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EnvironmentStatus {
@@ -21,6 +46,20 @@ pub struct EnvironmentStatus {
     pub skills_valid: bool,
     pub missing: Vec<String>,
     pub details: ToolchainState,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct BaselinePackagesInfo {
+    pub signature: String,
+    pub missing_in_workspace: Vec<String>,
+    pub missing_in_template: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct BaselinePackagesInstallResult {
+    pub signature: String,
+    pub installed_in_workspace: Vec<String>,
+    pub installed_in_template: Vec<String>,
 }
 
 pub struct EnvironmentManager {
@@ -301,7 +340,8 @@ pub async fn install_missing_dependencies(
         ("Detecting environment", 10),
         ("Installing toolchain", 30),
         ("Bootstrapping workspace", 60),
-        ("Installing Remotion skills", 85),
+        ("Installing baseline packages", 78),
+        ("Installing Remotion skills", 90),
         ("Finalizing", 100),
     ];
 
@@ -320,6 +360,19 @@ pub async fn install_missing_dependencies(
         if step == "Bootstrapping workspace" {
             let env_manager = EnvironmentManager::new(app_dir.clone());
             run_pnpm_install(&window, &workspace_path, &env_manager).await?;
+        }
+
+        if step == "Installing baseline packages" {
+            let env_manager = EnvironmentManager::new(app_dir.clone());
+            ensure_baseline_packages(&window, &workspace_path, &env_manager).await?;
+
+            // Also seed the app-local workspace template (so future new projects start with
+            // baseline deps already declared in package.json/pnpm-lock.yaml). Best-effort.
+            if let Some(template_dir) = projects::get_mutable_template_dir(&window.app_handle())? {
+                let template_path = template_dir.to_string_lossy().to_string();
+                ensure_baseline_packages(&window, &template_path, &env_manager).await?;
+                cleanup_template_runtime_artifacts(&template_dir);
+            }
         }
 
         if step == "Installing toolchain" {
@@ -349,6 +402,356 @@ pub async fn install_missing_dependencies(
     Ok(())
 }
 
+#[tauri::command]
+pub async fn install_js_packages(
+    window: tauri::Window,
+    workspace_path: String,
+    packages: Vec<String>,
+) -> Result<(), String> {
+    let app_dir = window
+        .app_handle()
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| e.to_string())?;
+    let env_manager = EnvironmentManager::new(app_dir);
+
+    let pkgs: Vec<String> = packages
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if pkgs.is_empty() {
+        return Ok(());
+    }
+
+    let _ = window.emit(
+        "env_install_progress",
+        serde_json::json!({ "step": "Installing dependencies", "percent": 0 }),
+    );
+    let _ = window.emit(
+        "env_install_progress",
+        serde_json::json!({ "step": format!("pnpm add {}", pkgs.join(", ")), "percent": 10 }),
+    );
+
+    let app_data_dir = install_log::toolchain_dir_to_app_data_dir(&env_manager.toolchain_dir);
+    let ws_path = std::path::Path::new(&workspace_path);
+    install_log::log_env_install(
+        Some(&window),
+        app_data_dir.as_deref(),
+        Some(ws_path),
+        &format!("Installing JS packages (user-approved): {}", pkgs.join(", ")),
+    );
+
+    match run_pnpm_add(&window, &workspace_path, &env_manager, &pkgs).await {
+        Ok(()) => {
+            let _ = window.emit(
+                "env_install_progress",
+                serde_json::json!({ "step": "Dependencies installed", "percent": 100 }),
+            );
+            Ok(())
+        }
+        Err(e) => {
+            let _ = window.emit(
+                "env_install_progress",
+                serde_json::json!({ "step": "Dependency install failed", "percent": 100 }),
+            );
+            Err(e)
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn link_workspace_dependencies(
+    window: tauri::Window,
+    workspace_path: String,
+) -> Result<(), String> {
+    let app_dir = window
+        .app_handle()
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| e.to_string())?;
+    let env_manager = EnvironmentManager::new(app_dir);
+
+    let _ = window.emit(
+        "env_install_progress",
+        serde_json::json!({ "step": "Linking dependencies", "percent": 10 }),
+    );
+    run_pnpm_install(&window, &workspace_path, &env_manager).await?;
+    let _ = window.emit(
+        "env_install_progress",
+        serde_json::json!({ "step": "Dependencies ready", "percent": 100 }),
+    );
+    Ok(())
+}
+
+fn cleanup_template_runtime_artifacts(template_dir: &std::path::Path) {
+    // Keep the template clean so newly created projects don’t inherit logs or node_modules.
+    let _ = std::fs::remove_dir_all(template_dir.join("logs"));
+    let _ = std::fs::remove_dir_all(template_dir.join("node_modules"));
+}
+
+fn workspace_store_dir(ws_path: &std::path::Path) -> std::path::PathBuf {
+    ws_path
+        .parent()
+        .map(|p| p.join(".pnpm-store"))
+        .unwrap_or_else(|| ws_path.join(".pnpm-store"))
+}
+
+fn baseline_signature(app_version: &str) -> String {
+    let joined = BASELINE_NPM_PACKAGES
+        .iter()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>()
+        .join("|");
+    format!("baseline-v1:{}@app:{}", joined, app_version)
+}
+
+fn missing_baseline_packages_for_dir(ws_path: &std::path::Path) -> Result<Vec<String>, String> {
+    let pkg_json_path = ws_path.join("package.json");
+    if !pkg_json_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let bytes = std::fs::read(&pkg_json_path).map_err(|e| e.to_string())?;
+    let pkg: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+
+    let mut installed = std::collections::HashSet::new();
+    for key in ["dependencies", "devDependencies"] {
+        if let Some(obj) = pkg.get(key).and_then(|v| v.as_object()) {
+            for (k, _) in obj.iter() {
+                installed.insert(k.to_string());
+            }
+        }
+    }
+
+    Ok(BASELINE_NPM_PACKAGES
+        .iter()
+        .filter(|p| !installed.contains(&p.to_string()))
+        .map(|p| p.to_string())
+        .collect())
+}
+
+#[tauri::command]
+pub fn get_baseline_packages_info(
+    app_handle: tauri::AppHandle,
+    workspace_path: String,
+) -> Result<BaselinePackagesInfo, String> {
+    let signature = baseline_signature(&app_handle.package_info().version.to_string());
+    let ws_path = std::path::PathBuf::from(&workspace_path);
+    let missing_in_workspace = missing_baseline_packages_for_dir(&ws_path)?;
+
+    let mut missing_in_template: Vec<String> = Vec::new();
+    if let Some(template_dir) = projects::get_mutable_template_dir(&app_handle)? {
+        missing_in_template = missing_baseline_packages_for_dir(&template_dir)?;
+    }
+
+    Ok(BaselinePackagesInfo {
+        signature,
+        missing_in_workspace,
+        missing_in_template,
+    })
+}
+
+#[tauri::command]
+pub async fn install_baseline_packages(
+    window: tauri::Window,
+    workspace_path: String,
+) -> Result<BaselinePackagesInstallResult, String> {
+    let signature = baseline_signature(&window.app_handle().package_info().version.to_string());
+    let app_dir = window
+        .app_handle()
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| e.to_string())?;
+    let env_manager = EnvironmentManager::new(app_dir);
+
+    let mut installed_in_workspace: Vec<String> = Vec::new();
+    let mut installed_in_template: Vec<String> = Vec::new();
+
+    let ws_path = std::path::PathBuf::from(&workspace_path);
+    let missing_ws = missing_baseline_packages_for_dir(&ws_path)?;
+    if !missing_ws.is_empty() {
+        let _ = window.emit(
+            "env_install_progress",
+            serde_json::json!({ "step": "Installing baseline packages (workspace)", "percent": 30 }),
+        );
+        run_pnpm_add(&window, &workspace_path, &env_manager, &missing_ws).await?;
+        installed_in_workspace = missing_ws;
+    }
+
+    if let Some(template_dir) = projects::get_mutable_template_dir(&window.app_handle())? {
+        let missing_template = missing_baseline_packages_for_dir(&template_dir)?;
+        if !missing_template.is_empty() {
+            let template_path = template_dir.to_string_lossy().to_string();
+            let _ = window.emit(
+                "env_install_progress",
+                serde_json::json!({ "step": "Installing baseline packages (template)", "percent": 70 }),
+            );
+            run_pnpm_add(&window, &template_path, &env_manager, &missing_template).await?;
+            cleanup_template_runtime_artifacts(&template_dir);
+            installed_in_template = missing_template;
+        }
+    }
+
+    let _ = window.emit(
+        "env_install_progress",
+        serde_json::json!({ "step": "Baseline packages ready", "percent": 100 }),
+    );
+
+    Ok(BaselinePackagesInstallResult {
+        signature,
+        installed_in_workspace,
+        installed_in_template,
+    })
+}
+
+async fn ensure_baseline_packages(
+    window: &tauri::Window,
+    workspace_path: &str,
+    env_manager: &EnvironmentManager,
+) -> Result<(), String> {
+    let app_data_dir = install_log::toolchain_dir_to_app_data_dir(&env_manager.toolchain_dir);
+    let ws_path = std::path::Path::new(workspace_path).to_path_buf();
+
+    let pkg_json_path = ws_path.join("package.json");
+    if !pkg_json_path.exists() {
+        install_log::log_env_install(
+            Some(window),
+            app_data_dir.as_deref(),
+            Some(&ws_path),
+            "Baseline packages: package.json not found; skipping.",
+        );
+        return Ok(());
+    }
+
+    let missing = missing_baseline_packages_for_dir(&ws_path)?;
+
+    if missing.is_empty() {
+        install_log::log_env_install(
+            Some(window),
+            app_data_dir.as_deref(),
+            Some(&ws_path),
+            "Baseline packages: already installed.",
+        );
+        return Ok(());
+    }
+
+    install_log::log_env_install(
+        Some(window),
+        app_data_dir.as_deref(),
+        Some(&ws_path),
+        &format!("Baseline packages: installing {}...", missing.join(", ")),
+    );
+
+    run_pnpm_add(window, workspace_path, env_manager, &missing).await?;
+    Ok(())
+}
+
+async fn run_pnpm_add(
+    window: &tauri::Window,
+    workspace_path: &str,
+    env_manager: &EnvironmentManager,
+    packages: &[String],
+) -> Result<(), String> {
+    let app_data_dir = install_log::toolchain_dir_to_app_data_dir(&env_manager.toolchain_dir);
+    let ws_path = std::path::Path::new(workspace_path).to_path_buf();
+
+    let store_dir = workspace_store_dir(&ws_path);
+    let _ = std::fs::create_dir_all(&store_dir);
+    install_log::log_env_install(
+        Some(window),
+        app_data_dir.as_deref(),
+        Some(&ws_path),
+        &format!("pnpm store: {}", store_dir.to_string_lossy()),
+    );
+
+    let logs_dir = ws_path.join("logs");
+    let _ = std::fs::create_dir_all(&logs_dir);
+    let pnpm_log_path = logs_dir.join("pnpm-add.log");
+    let pnpm_log = std::sync::Arc::new(std::sync::Mutex::new(
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&pnpm_log_path)
+            .map_err(|e| e.to_string())?,
+    ));
+
+    let bin_dir = env_manager.get_bin_dir();
+    let path_env = std::env::var("PATH").unwrap_or_default();
+    let new_path = format!("{};{}", bin_dir.to_string_lossy(), path_env);
+
+    let store_dir_arg = store_dir.to_string_lossy().to_string();
+    let mut args: Vec<String> = Vec::new();
+    args.push("add".into());
+    args.push("--save-exact".into());
+    args.push("--prefer-offline".into());
+    args.push("--store-dir".into());
+    args.push(store_dir_arg);
+    for p in packages {
+        args.push(p.clone());
+    }
+
+    let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let mut child = crate::utils::create_async_shell_command("pnpm", &args_ref)
+        .current_dir(workspace_path)
+        .env("PATH", &new_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn pnpm add: {}", e))?;
+
+    let stdout = child.stdout.take().ok_or("Failed to capture pnpm stdout (add)")?;
+    let stderr = child.stderr.take().ok_or("Failed to capture pnpm stderr (add)")?;
+    let mut stdout_reader = BufReader::new(stdout).lines();
+    let mut stderr_reader = BufReader::new(stderr).lines();
+
+    let w1 = window.clone();
+    let log1 = pnpm_log.clone();
+    let app_dir1 = app_data_dir.clone();
+    let ws1 = ws_path.clone();
+    let stdout_task = tokio::spawn(async move {
+        while let Ok(Some(line)) = stdout_reader.next_line().await {
+            if let Ok(mut f) = log1.lock() {
+                let _ = writeln!(f, "[stdout] {}", line);
+            }
+            install_log::log_env_install(Some(&w1), app_dir1.as_deref(), Some(&ws1), &line);
+        }
+    });
+
+    let w2 = window.clone();
+    let log2 = pnpm_log.clone();
+    let app_dir2 = app_data_dir.clone();
+    let ws2 = ws_path.clone();
+    let stderr_task = tokio::spawn(async move {
+        while let Ok(Some(line)) = stderr_reader.next_line().await {
+            if let Ok(mut f) = log2.lock() {
+                let _ = writeln!(f, "[stderr] {}", line);
+            }
+            install_log::log_env_install(Some(&w2), app_dir2.as_deref(), Some(&ws2), &line);
+        }
+    });
+
+    let status = child.wait().await.map_err(|e| e.to_string())?;
+    let _ = stdout_task.await;
+    let _ = stderr_task.await;
+
+    if !status.success() {
+        return Err(format!(
+            "pnpm add failed (exit code: {:?}). See {} for details.",
+            status.code(),
+            pnpm_log_path.to_string_lossy()
+        ));
+    }
+
+    install_log::log_env_install(
+        Some(window),
+        app_data_dir.as_deref(),
+        Some(&ws_path),
+        &format!("pnpm add completed. Log: {}", pnpm_log_path.to_string_lossy()),
+    );
+    Ok(())
+}
+
 async fn run_pnpm_install(
     window: &tauri::Window,
     workspace_path: &str,
@@ -361,6 +764,17 @@ async fn run_pnpm_install(
         app_data_dir.as_deref(),
         Some(&ws_path),
         "Running pnpm install...",
+    );
+
+    // Keep pnpm store on the same drive as the workspace to avoid Windows hardlink issues
+    // (e.g. when the default store is on C: but workspace is on D:).
+    let store_dir = workspace_store_dir(&ws_path);
+    let _ = std::fs::create_dir_all(&store_dir);
+    install_log::log_env_install(
+        Some(window),
+        app_data_dir.as_deref(),
+        Some(&ws_path),
+        &format!("pnpm store: {}", store_dir.to_string_lossy()),
     );
 
     let logs_dir = std::path::Path::new(workspace_path).join("logs");
@@ -378,12 +792,19 @@ async fn run_pnpm_install(
     let path_env = std::env::var("PATH").unwrap_or_default();
     let new_path = format!("{};{}", bin_dir.to_string_lossy(), path_env);
 
+    let store_dir_arg = store_dir.to_string_lossy().to_string();
     let mut child = crate::utils::create_async_shell_command(
         "pnpm",
-        &["install", "--frozen-lockfile", "--prefer-offline"],
+        &[
+            "install",
+            "--frozen-lockfile",
+            "--prefer-offline",
+            "--store-dir",
+            &store_dir_arg,
+        ],
     )
         .current_dir(workspace_path)
-        .env("PATH", new_path)
+        .env("PATH", &new_path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -425,6 +846,89 @@ async fn run_pnpm_install(
     let _ = stderr_task.await;
 
     if !status.success() {
+        // Best-effort: on Windows, we sometimes see `UNKNOWN: unknown error, open ...` with a
+        // negative exit code, leaving a partially written node_modules. Repair once by removing
+        // node_modules and retrying.
+        let should_retry = status.code() == Some(-4094);
+        if should_retry {
+            install_log::log_env_install(
+                Some(window),
+                app_data_dir.as_deref(),
+                Some(&ws_path),
+                "pnpm install failed; attempting repair: removing workspace node_modules and retrying once...",
+            );
+            let _ = std::fs::remove_dir_all(ws_path.join("node_modules"));
+
+            let mut retry_child = crate::utils::create_async_shell_command(
+                "pnpm",
+                &[
+                    "install",
+                    "--frozen-lockfile",
+                    "--prefer-offline",
+                    "--store-dir",
+                    &store_dir_arg,
+                    "--force",
+                ],
+            )
+            .current_dir(workspace_path)
+            .env("PATH", &new_path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to spawn pnpm install (retry): {}", e))?;
+
+            let stdout = retry_child
+                .stdout
+                .take()
+                .ok_or("Failed to capture pnpm stdout (retry)")?;
+            let stderr = retry_child
+                .stderr
+                .take()
+                .ok_or("Failed to capture pnpm stderr (retry)")?;
+            let mut stdout_reader = BufReader::new(stdout).lines();
+            let mut stderr_reader = BufReader::new(stderr).lines();
+
+            let w1 = window.clone();
+            let log1 = pnpm_log.clone();
+            let app_dir1 = app_data_dir.clone();
+            let ws1 = ws_path.clone();
+            let stdout_task = tokio::spawn(async move {
+                while let Ok(Some(line)) = stdout_reader.next_line().await {
+                    if let Ok(mut f) = log1.lock() {
+                        let _ = writeln!(f, "[retry][stdout] {}", line);
+                    }
+                    install_log::log_env_install(Some(&w1), app_dir1.as_deref(), Some(&ws1), &line);
+                }
+            });
+
+            let w2 = window.clone();
+            let log2 = pnpm_log.clone();
+            let app_dir2 = app_data_dir.clone();
+            let ws2 = ws_path.clone();
+            let stderr_task = tokio::spawn(async move {
+                while let Ok(Some(line)) = stderr_reader.next_line().await {
+                    if let Ok(mut f) = log2.lock() {
+                        let _ = writeln!(f, "[retry][stderr] {}", line);
+                    }
+                    install_log::log_env_install(Some(&w2), app_dir2.as_deref(), Some(&ws2), &line);
+                }
+            });
+
+            let retry_status = retry_child.wait().await.map_err(|e| e.to_string())?;
+            let _ = stdout_task.await;
+            let _ = stderr_task.await;
+
+            if retry_status.success() {
+                install_log::log_env_install(
+                    Some(window),
+                    app_data_dir.as_deref(),
+                    Some(&ws_path),
+                    "pnpm install completed after repair retry.",
+                );
+                return Ok(());
+            }
+        }
+
         install_log::log_env_install(
             Some(window),
             app_data_dir.as_deref(),

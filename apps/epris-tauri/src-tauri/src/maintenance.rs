@@ -111,3 +111,38 @@ pub fn reset_user_data(
     })
 }
 
+#[tauri::command]
+pub fn set_debug_force_dependency_request(
+    app_handle: tauri::AppHandle,
+    value: Option<String>,
+) -> Result<(), String> {
+    let app_dir = app_handle
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+    let mgr = StateManager::new(app_dir);
+    mgr.update(|s| {
+        s.debug_force_dependency_request = value
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+    })
+    .map(|_| ())
+}
+
+#[tauri::command]
+pub fn set_baseline_packages_ack(
+    app_handle: tauri::AppHandle,
+    signature: Option<String>,
+) -> Result<(), String> {
+    let app_dir = app_handle
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+    let mgr = StateManager::new(app_dir);
+    mgr.update(|s| {
+        s.baseline_packages_ack = signature
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+    })
+    .map(|_| ())
+}

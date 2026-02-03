@@ -81,6 +81,12 @@ pub struct AppStateStore {
 
     pub stt_whisper_model: Option<String>,
     pub stt_whisper_task: Option<String>,
+
+    #[serde(default)]
+    pub debug_force_dependency_request: Option<String>,
+
+    #[serde(default)]
+    pub baseline_packages_ack: Option<String>,
 }
 
 impl Default for AppStateStore {
@@ -95,6 +101,8 @@ impl Default for AppStateStore {
             gemini_api_key: None,
             stt_whisper_model: None,
             stt_whisper_task: None,
+            debug_force_dependency_request: None,
+            baseline_packages_ack: None,
         }
     }
 }

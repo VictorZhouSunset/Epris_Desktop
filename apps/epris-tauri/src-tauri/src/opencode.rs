@@ -29,8 +29,41 @@ pub const OPENCODE_SYSTEM_PROMPT: &str = "You are an expert Remotion animation d
     3. Ensure the composition still renders successfully after changes (clean imports, valid JSX). \
     4. Use Remotion's animation APIs: useCurrentFrame, interpolate, spring, staticFile, etc. \
     5. Only operate on files inside the 'src' directory. DO NOT create standalone HTML files or files in the root. \
+    6. Do NOT install dependencies. Do NOT run pnpm/npm/yarn/bun commands. Do NOT change package.json or pnpm-lock.yaml. \
+       If you need a new npm package, write a short request in your response like: \
+       DEPENDENCY_REQUEST: <pkg1>, <pkg2> (1-line reason). Then stop. \
+    7. If the user explicitly requests using a specific npm package (e.g. \"use simplex-noise\"), you MUST use that package via import. \
+       Do NOT re-implement or substitute a different library to avoid the dependency. If it's missing, output DEPENDENCY_REQUEST and stop. \
     \
     The current working directory is the workspace root.";
+
+fn describe_installed_packages(workspace_path: &str) -> String {
+    let pkg_path = std::path::Path::new(workspace_path).join("package.json");
+    let bytes = match std::fs::read(&pkg_path) {
+        Ok(b) => b,
+        Err(_) => return "package.json not found".to_string(),
+    };
+    let v: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(_) => return "package.json unreadable".to_string(),
+    };
+
+    let mut deps: Vec<String> = Vec::new();
+    let mut dev: Vec<String> = Vec::new();
+    if let Some(obj) = v.get("dependencies").and_then(|x| x.as_object()) {
+        deps.extend(obj.keys().cloned());
+    }
+    if let Some(obj) = v.get("devDependencies").and_then(|x| x.as_object()) {
+        dev.extend(obj.keys().cloned());
+    }
+    deps.sort();
+    dev.sort();
+    format!(
+        "dependencies: [{}]\n devDependencies: [{}]\n(If you need a new package, do NOT install; request it.)",
+        deps.join(", "),
+        dev.join(", ")
+    )
+}
 
 pub struct OpenCodeState {
     pub process: Option<Child>,
@@ -335,8 +368,9 @@ pub async fn send_prompt(
 
     let prompt_start = std::time::Instant::now();
     let system_prompt = format!(
-        "{} The Remotion workspace is located at: {}. You MUST read src/Composition.tsx and src/Root.tsx.",
+        "{}\n\nInstalled npm packages:\n{}\n\nThe Remotion workspace is located at: {}. You MUST read src/Composition.tsx and src/Root.tsx.",
         remotion_rules,
+        describe_installed_packages(&workspace_path),
         workspace_path
     );
 

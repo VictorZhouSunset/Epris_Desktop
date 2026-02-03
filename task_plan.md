@@ -1,0 +1,8 @@
+- [x] Confirm current baseline install flow (wizard vs auto-link)
+- [x] Stop silent baseline installs in `link_workspace_dependencies`
+- [x] Add backend API to compute missing baseline packages + signature
+- [x] Add backend API to persist “baseline deps acknowledged” signature
+- [x] Add backend API to install baseline deps (workspace + template) when user approves
+- [x] Update frontend to prompt once per signature on app update
+- [ ] Verify new-project flow: no wizard; shows progress; links deps
+- [ ] Verify update flow: asks once when baseline changes; no repeated prompts
