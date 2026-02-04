@@ -258,12 +258,24 @@ async fn ensure_npm_global_package(
     }
 
     let prefix = bin_dir.to_string_lossy().to_string();
-    let args = ["install", "-g", &pkg_spec, "--prefix", &prefix, "--no-fund", "--no-audit", "--silent"];
+    let args = [
+        "install",
+        "-g",
+        &pkg_spec,
+        "--prefix",
+        &prefix,
+        "--no-fund",
+        "--no-audit",
+        "--silent",
+        "--loglevel",
+        "error",
+    ];
 
     let mut cmd = utils::create_shell_command("npm", &args);
     cmd.env("PATH", prepend_path(&bin_dir)?);
     cmd.env("npm_config_cache", npm_cache.to_string_lossy().to_string());
     cmd.env("npm_config_update_notifier", "false");
+    cmd.env("npm_config_loglevel", "error");
 
     let out = cmd.output().map_err(|e| e.to_string())?;
     if !out.status.success() {

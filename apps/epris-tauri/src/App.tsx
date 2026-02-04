@@ -115,7 +115,7 @@ function App() {
     error: previewError,
     start: startPreview,
   } = usePreviewServer(workspacePath, isEnvReady);
-  const { status: openCodeStatus } = useOpenCode(workspacePath, isEnvReady);
+  const { status: openCodeStatus, error: openCodeError } = useOpenCode(workspacePath, isEnvReady);
   const previewUrl = previewStatus === 'running' && port ? `http://127.0.0.1:${port}` : null;
 
   const { waitPort } = useWaitPort();
@@ -130,6 +130,12 @@ function App() {
     if (!workspacePath) return '';
     const sep = workspacePath.includes('\\') ? '\\' : '/';
     return `${workspacePath}${sep}logs${sep}preview.log`;
+  }, [workspacePath]);
+
+  const opencodeLogPath = useMemo(() => {
+    if (!workspacePath) return '';
+    const sep = workspacePath.includes('\\') ? '\\' : '/';
+    return `${workspacePath}${sep}logs${sep}opencode.log`;
   }, [workspacePath]);
 
   const {
@@ -1225,6 +1231,20 @@ function App() {
                     {hasGateError && (
                       <button onClick={handleViewLogs} className="ml-2 underline text-amber-400 hover:text-amber-300">
                         View Logs
+                      </button>
+                    )}
+                  </p>
+                )}
+
+                {openCodeStatus === 'error' && (
+                  <p className="px-4 text-sm text-red-400">
+                    AI Error: {openCodeError?.message || 'Unknown error'}
+                    {opencodeLogPath && (
+                      <button
+                        onClick={() => openPath(opencodeLogPath).catch(console.error)}
+                        className="ml-2 underline text-amber-400 hover:text-amber-300"
+                      >
+                        Open opencode.log
                       </button>
                     )}
                   </p>

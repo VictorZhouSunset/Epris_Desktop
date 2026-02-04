@@ -3,12 +3,14 @@ import { IpcService } from '../lib/ipc';
 
 async function waitPort(port: number, timeout = 30000) {
   const start = Date.now();
-  // For OpenCode, check global health
-  const url = `http://127.0.0.1:${port}/global/health`;
+  const base = `http://127.0.0.1:${port}`;
+  const candidates = [`${base}/global/health`, `${base}/health`, `${base}/`];
   while (Date.now() - start < timeout) {
     try {
-      const res = await fetch(url);
-      if (res.ok) return true;
+      for (const url of candidates) {
+        const res = await fetch(url);
+        if (res.ok) return true;
+      }
     } catch (e) {
       // Continue
     }

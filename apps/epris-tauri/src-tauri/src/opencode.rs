@@ -2,6 +2,7 @@ use serde::{Serialize, Deserialize};
 use std::path::Path;
 use std::io::Write;
 use std::process::Child;
+use std::process::Stdio;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use crate::utils;
@@ -104,6 +105,7 @@ pub fn cancel_current_run(
 
 #[tauri::command]
 pub fn start_opencode(
+    app_handle: tauri::AppHandle,
     state: tauri::State<'_, Mutex<OpenCodeState>>,
     workspace_path: String,
 ) -> Result<u16, String> {
@@ -114,10 +116,53 @@ pub fn start_opencode(
     }
     
     let port = utils::find_available_port(4096);
-    let child = utils::create_shell_command("opencode", &["serve", "--hostname", "127.0.0.1", "--port", &port.to_string()])
-        .current_dir(&workspace_path)
+
+    let logs_dir = Path::new(&workspace_path).join("logs");
+    let _ = std::fs::create_dir_all(&logs_dir);
+    let log_path = logs_dir.join("opencode.log");
+    let mut log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|e| format!("Failed to open opencode.log: {}", e))?;
+    let _ = writeln!(log_file, "\n--- OpenCode Server Log [{}] ---", chrono::Utc::now());
+
+    let mut cmd = utils::create_shell_command(
+        "opencode",
+        &["serve", "--hostname", "127.0.0.1", "--port", &port.to_string()],
+    );
+    cmd.current_dir(&workspace_path);
+
+    // Ensure the server can find our local toolchain/bin (opencode may not be on system PATH).
+    let app_dir = app_handle
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+    let toolchain_bin = app_dir.join("toolchain").join("bin");
+    let path_sep = if cfg!(target_os = "windows") { ";" } else { ":" };
+    let current_path = std::env::var("PATH").unwrap_or_default();
+    let new_path = format!("{}{}{}", toolchain_bin.to_string_lossy(), path_sep, current_path);
+    cmd.env("PATH", new_path);
+
+    // Reduce unreadable ANSI escape sequences in opencode.log.
+    cmd.env("NO_COLOR", "1");
+    cmd.env("FORCE_COLOR", "0");
+    cmd.env("TERM", "dumb");
+
+    cmd.stdout(Stdio::from(log_file.try_clone().map_err(|e| e.to_string())?));
+    cmd.stderr(Stdio::from(log_file));
+
+    let mut child = cmd
         .spawn()
         .map_err(|e| format!("Failed to start OpenCode: {}", e))?;
+
+    // If the child exits immediately, surface a helpful error.
+    if let Ok(Some(status)) = child.try_wait() {
+        return Err(format!(
+            "OpenCode server exited immediately (code: {:?}). Check workspace/logs/opencode.log",
+            status.code()
+        ));
+    }
     
     oc.process = Some(child);
     oc.port = port;
