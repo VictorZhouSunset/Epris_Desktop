@@ -78,9 +78,9 @@ pub struct GateResult {
 }
 
 #[tauri::command]
-pub async fn run_gate(workspace_path: String) -> Result<GateResult, String> {
+pub async fn run_gate(app_handle: tauri::AppHandle, workspace_path: String) -> Result<GateResult, String> {
     // Default command behavior stays strict.
-    run_gate_with_mode(workspace_path, GateMode::Strict, None).await
+    run_gate_with_mode(workspace_path, GateMode::Strict, Some(&app_handle)).await
 }
 
 pub async fn run_gate_with_mode(
@@ -165,12 +165,27 @@ pub async fn run_gate_with_mode(
             return Err("Gate canceled".to_string());
         }
 
-        let child = utils::create_shell_command("pnpm", args)
+        let mut child = utils::create_shell_command("pnpm", args)
             .current_dir(&workspace_path)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("Failed to spawn pnpm {:?}: {}", args, e))?;
+            ;
+
+        // Ensure pnpm resolves to our app-local toolchain when present.
+        if let Some(h) = app_handle {
+            if let Ok(app_dir) = h.path().app_local_data_dir() {
+                let toolchain_bin = app_dir.join("toolchain").join("bin");
+                let sep = if cfg!(target_os = "windows") { ";" } else { ":" };
+                let current = std::env::var("PATH").unwrap_or_default();
+                child.env("PATH", format!("{}{}{}", toolchain_bin.to_string_lossy(), sep, current));
+                // Reduce unreadable ANSI escape sequences in logs.
+                child.env("NO_COLOR", "1");
+                child.env("FORCE_COLOR", "0");
+                child.env("TERM", "dumb");
+            }
+        }
+
+        let child = child.spawn().map_err(|e| format!("Failed to spawn pnpm {:?}: {}", args, e))?;
 
         let pid = child.id();
         GATE_CURRENT_PID.store(pid, Ordering::SeqCst);

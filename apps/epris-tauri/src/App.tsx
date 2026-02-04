@@ -582,11 +582,10 @@ function App() {
   const handleViewLogs = useCallback(async () => {
     if (!workspacePath) return;
     try {
-      const logPath = `${workspacePath}\\logs\\gate.jsonl`;
-      await openPath(logPath);
+      await openPath(`${workspacePath}\\logs`);
     } catch (err) {
       console.error('Failed to open logs:', err);
-      alert('Failed to open logs. Check: ' + workspacePath + '\\logs\\gate.jsonl');
+      alert('Failed to open logs. Check: ' + workspacePath + '\\logs');
     }
   }, [workspacePath]);
 

@@ -8,8 +8,11 @@ async function waitPort(port: number, timeout = 30000) {
   while (Date.now() - start < timeout) {
     try {
       for (const url of candidates) {
-        const res = await fetch(url);
-        if (res.ok) return true;
+        // This is a cross-origin request from the Tauri app origin to localhost.
+        // Use `no-cors` to avoid failing readiness checks when the server doesn't set CORS headers.
+        const res = await fetch(url, { mode: 'no-cors' });
+        // In `no-cors`, successful cross-origin responses are typically "opaque" with status 0.
+        if (res.type === 'opaque' || res.status !== 0) return true;
       }
     } catch (e) {
       // Continue

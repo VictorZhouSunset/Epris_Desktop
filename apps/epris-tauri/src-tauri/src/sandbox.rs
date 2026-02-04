@@ -6,6 +6,10 @@ pub const AUDIT_ALLOWED_TOP_LEVEL_DIRS: &[&str] = &["src", "public", ".gemini", 
 pub const AUDIT_IGNORE_TOP_LEVEL_DIRS: &[&str] = &["logs", ".epris"];
 pub const AUDIT_FORBIDDEN_TOP_LEVEL_DIRS: &[&str] = &["node_modules", ".git"];
 
+// Runtime tooling (Vite/webpack/Remotion) can write caches under node_modules while the preview
+// server is running. These are not considered AI violations.
+pub const AUDIT_NODE_MODULES_IGNORED_DIRS: &[&str] = &[".cache", ".vite"];
+
 #[derive(Debug, Clone)]
 pub struct AuditReport {
     pub violations: Vec<String>,
@@ -29,6 +33,47 @@ fn find_recent_write_in_dir(
     let mut visited = 0usize;
 
     for entry in WalkDir::new(root).follow_links(false).into_iter().filter_map(Result::ok) {
+        visited += 1;
+        if visited > max_entries || started.elapsed() > max_duration {
+            return (None, true);
+        }
+
+        let path = entry.path();
+        if entry.file_type().is_file() {
+            let modified = std::fs::metadata(path).and_then(|m| m.modified());
+            if is_after(modified, since) {
+                return (Some(path.to_path_buf()), false);
+            }
+        }
+    }
+
+    (None, false)
+}
+
+fn find_recent_write_in_dir_with_ignored_top_level_dirs(
+    root: &Path,
+    since: SystemTime,
+    max_entries: usize,
+    max_duration: Duration,
+    ignored_dir_names: &[&str],
+) -> (Option<PathBuf>, bool) {
+    let started = Instant::now();
+    let mut visited = 0usize;
+
+    let it = WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| {
+            // Only skip at depth 1 (direct children of `root`).
+            if e.depth() == 1 {
+                if let Some(name) = e.file_name().to_str() {
+                    return !ignored_dir_names.iter().any(|d| *d == name);
+                }
+            }
+            true
+        });
+
+    for entry in it.filter_map(Result::ok) {
         visited += 1;
         if visited > max_entries || started.elapsed() > max_duration {
             return (None, true);
@@ -71,7 +116,17 @@ pub fn audit_workspace_after_ai_run(workspace_root: &Path, since: SystemTime) ->
             (50_000usize, Duration::from_secs(2))
         };
 
-        let (hit, timed_out) = find_recent_write_in_dir(&p, since, max_entries, max_duration);
+        let (hit, timed_out) = if *dir == "node_modules" {
+            find_recent_write_in_dir_with_ignored_top_level_dirs(
+                &p,
+                since,
+                max_entries,
+                max_duration,
+                AUDIT_NODE_MODULES_IGNORED_DIRS,
+            )
+        } else {
+            find_recent_write_in_dir(&p, since, max_entries, max_duration)
+        };
         if timed_out {
             incomplete = true;
         }
@@ -201,6 +256,40 @@ mod tests {
     }
 
     #[test]
+    fn ignores_writes_in_node_modules_cache() {
+        let tmp = tempdir().unwrap();
+        let ws = tmp.path();
+        std::fs::create_dir_all(ws.join("node_modules").join(".cache")).unwrap();
+
+        let since = SystemTime::now();
+        touch_after(&ws.join("node_modules").join(".cache").join("x.bin"), since);
+
+        let report = audit_workspace_after_ai_run(ws, since).unwrap();
+        assert!(
+            report.violations.is_empty(),
+            "expected no violations for node_modules/.cache, got: {:?}",
+            report.violations
+        );
+    }
+
+    #[test]
+    fn ignores_writes_in_node_modules_vite_cache() {
+        let tmp = tempdir().unwrap();
+        let ws = tmp.path();
+        std::fs::create_dir_all(ws.join("node_modules").join(".vite")).unwrap();
+
+        let since = SystemTime::now();
+        touch_after(&ws.join("node_modules").join(".vite").join("dep.js"), since);
+
+        let report = audit_workspace_after_ai_run(ws, since).unwrap();
+        assert!(
+            report.violations.is_empty(),
+            "expected no violations for node_modules/.vite, got: {:?}",
+            report.violations
+        );
+    }
+
+    #[test]
     fn flags_writes_outside_allowed_dirs() {
         let tmp = tempdir().unwrap();
         let ws = tmp.path();
@@ -229,4 +318,3 @@ mod tests {
         );
     }
 }
-

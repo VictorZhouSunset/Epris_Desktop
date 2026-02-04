@@ -28,6 +28,14 @@ Any detected writes under these are treated as a security violation:
 - `.git/**`
 - Any other top-level file/folder outside the allow/ignore lists.
 
+### Exception: runtime caches
+
+When the preview server is running, some tooling (Vite/webpack/Remotion) may write runtime caches.
+These paths are **ignored** by the audit (not treated as AI violations):
+
+- `node_modules/.cache/**`
+- `node_modules/.vite/**`
+
 ## Rollback behavior
 
 Epris takes a pre-flight backup (`.epris/backups/pre_flight`) before running the provider.
@@ -41,4 +49,3 @@ If the audit detects a violation:
 ## Limitations (best-effort)
 
 `node_modules` can be extremely large; V0.5’s node_modules audit is best-effort to avoid blocking the UI for long periods.
-

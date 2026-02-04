@@ -215,7 +215,27 @@ impl EnvironmentManager {
         // Check Workspace Deps
         if let Some(path) = workspace_path {
             let node_modules = std::path::Path::new(path).join("node_modules");
-            if node_modules.exists() {
+            let pnpm_dir = node_modules.join(".pnpm");
+            let bin_dir = node_modules.join(".bin");
+            let vite_bin = if cfg!(target_os = "windows") {
+                bin_dir.join("vite.cmd")
+            } else {
+                bin_dir.join("vite")
+            };
+            let remotion_bin = if cfg!(target_os = "windows") {
+                bin_dir.join("remotion.cmd")
+            } else {
+                bin_dir.join("remotion")
+            };
+            let deps_ok = node_modules.exists()
+                && pnpm_dir.exists()
+                && bin_dir.exists()
+                && vite_bin.exists()
+                && remotion_bin.exists()
+                // Sanity check: avoid "node_modules exists but is corrupt" cases.
+                && pnpm_workspace_has_package(std::path::Path::new(path), "vite")
+                && pnpm_workspace_has_package(std::path::Path::new(path), "picomatch");
+            if deps_ok {
                 status.workspace_deps_valid = true;
             } else {
                 status.missing.push("workspace_deps".into());
@@ -442,9 +462,26 @@ pub async fn install_missing_dependencies(
             // If node_modules already exists, we can skip pnpm install here.
             // This keeps “Install missing dep” fast when only skills are missing.
             let ws_path = std::path::PathBuf::from(&workspace_path);
-            let deps_ok = ws_path.join("node_modules").join(".pnpm").exists()
-                || ws_path.join("node_modules").join(".bin").exists()
-                || ws_path.join("node_modules").exists();
+            let node_modules = ws_path.join("node_modules");
+            let pnpm_dir = node_modules.join(".pnpm");
+            let bin_dir = node_modules.join(".bin");
+            let vite_bin = if cfg!(target_os = "windows") {
+                bin_dir.join("vite.cmd")
+            } else {
+                bin_dir.join("vite")
+            };
+            let remotion_bin = if cfg!(target_os = "windows") {
+                bin_dir.join("remotion.cmd")
+            } else {
+                bin_dir.join("remotion")
+            };
+            let deps_ok = node_modules.exists()
+                && pnpm_dir.exists()
+                && bin_dir.exists()
+                && vite_bin.exists()
+                && remotion_bin.exists()
+                && pnpm_workspace_has_package(&ws_path, "vite")
+                && pnpm_workspace_has_package(&ws_path, "picomatch");
             if deps_ok {
                 install_log::log_env_install(
                     Some(&window),
@@ -603,6 +640,33 @@ fn workspace_store_dir(ws_path: &std::path::Path) -> std::path::PathBuf {
         .parent()
         .map(|p| p.join(".pnpm-store"))
         .unwrap_or_else(|| ws_path.join(".pnpm-store"))
+}
+
+fn pnpm_workspace_has_package(ws_path: &std::path::Path, package: &str) -> bool {
+    let pnpm_dir = ws_path.join("node_modules").join(".pnpm");
+    if !pnpm_dir.exists() {
+        return false;
+    }
+    let prefix = format!("{}@", package);
+    let entries = match std::fs::read_dir(&pnpm_dir) {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if !p.is_dir() {
+            continue;
+        }
+        let name = e.file_name().to_string_lossy().to_string();
+        if !name.starts_with(&prefix) {
+            continue;
+        }
+        let pkg_json = p.join("node_modules").join(package).join("package.json");
+        if pkg_json.exists() {
+            return true;
+        }
+    }
+    false
 }
 
 fn baseline_signature(app_version: &str) -> String {
@@ -1140,31 +1204,56 @@ async fn run_pnpm_install(
     }
 
     if !status.success() {
+        // Best-effort: on Windows, we sometimes see `UNKNOWN: unknown error, open ...` with a
+        // negative exit code, leaving a partially written node_modules. Repair once by removing
+        // node_modules and retrying. We also repair if we had to kill a "Done but hung" pnpm and
+        // the workspace looks incomplete afterwards.
+        let mut should_retry = status.code() == Some(-4094);
+        let mut retry_note: Option<String> = None;
+
         if force_killed_after_done.load(Ordering::SeqCst) && saw_done_line_at_sec.load(Ordering::SeqCst) > 0 {
             install_log::log_env_install(
                 Some(window),
                 app_data_dir.as_deref(),
                 Some(&ws_path),
-                "pnpm install printed Done but did not exit; terminated process tree and continued.",
+                "pnpm install printed Done but did not exit; terminated process tree.",
             );
-            install_log::log_env_install(
-                Some(window),
-                app_data_dir.as_deref(),
-                Some(&ws_path),
-                "pnpm install completed.",
-            );
-            return Ok(());
+
+            // Safety check: killing a stuck pnpm after it printed "Done" can still leave a partially
+            // linked node_modules. Verify a couple of critical deps for Vite runtime.
+            let vite_ok = pnpm_workspace_has_package(&ws_path, "vite");
+            let picomatch_ok = pnpm_workspace_has_package(&ws_path, "picomatch");
+            if vite_ok && picomatch_ok {
+                install_log::log_env_install(
+                    Some(window),
+                    app_data_dir.as_deref(),
+                    Some(&ws_path),
+                    "pnpm install verified: vite + picomatch present.",
+                );
+                install_log::log_env_install(
+                    Some(window),
+                    app_data_dir.as_deref(),
+                    Some(&ws_path),
+                    "pnpm install completed.",
+                );
+                return Ok(());
+            }
+
+            should_retry = true;
+            retry_note = Some(format!(
+                "pnpm install integrity check failed after forced termination (vite_ok={}, picomatch_ok={}); repairing once...",
+                vite_ok, picomatch_ok
+            ));
         }
-        // Best-effort: on Windows, we sometimes see `UNKNOWN: unknown error, open ...` with a
-        // negative exit code, leaving a partially written node_modules. Repair once by removing
-        // node_modules and retrying.
-        let should_retry = status.code() == Some(-4094);
+
         if should_retry {
             install_log::log_env_install(
                 Some(window),
                 app_data_dir.as_deref(),
                 Some(&ws_path),
-                "pnpm install failed; attempting repair: removing workspace node_modules and retrying once...",
+                retry_note.as_deref().unwrap_or(
+                    "pnpm install failed; attempting repair: removing workspace node_modules and retrying once...",
+                ),
             );
             let _ = std::fs::remove_dir_all(ws_path.join("node_modules"));
 
