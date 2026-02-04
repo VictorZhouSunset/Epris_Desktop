@@ -1287,7 +1287,6 @@ function App() {
         <FirstRunWizard
           workspacePath={workspacePath}
           provider={provider}
-          requestedPackages={missingPackages}
           onComplete={() => {
             setShowWizard(false);
             setWizardDismissed(false);

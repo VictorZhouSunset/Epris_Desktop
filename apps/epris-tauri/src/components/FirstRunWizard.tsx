@@ -23,11 +23,17 @@ interface FirstRunWizardProps {
   provider: string; // 'opencode' | 'gemini'
   onComplete: () => void;
   onClose?: () => void;
-  requestedPackages?: string[];
 }
 
-export function FirstRunWizard({ workspacePath, provider, onComplete, onClose, requestedPackages }: FirstRunWizardProps) {
+interface BaselinePackagesInfo {
+  signature: string;
+  missing_in_workspace: string[];
+  missing_in_template: string[];
+}
+
+export function FirstRunWizard({ workspacePath, provider, onComplete, onClose }: FirstRunWizardProps) {
   const [status, setStatus] = useState<EnvironmentStatus | null>(null);
+  const [baseline, setBaseline] = useState<BaselinePackagesInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [installing, setInstalling] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -40,8 +46,6 @@ export function FirstRunWizard({ workspacePath, provider, onComplete, onClose, r
   const [sttProgress, setSttProgress] = useState<string>('');
   const [sttProgressPercent, setSttProgressPercent] = useState<number | null>(null);
   const [sttModel, setSttModel] = useState<'tiny' | 'tiny.en' | 'small'>('tiny.en');
-
-  const requested = (requestedPackages || []).map((s) => String(s || '').trim()).filter(Boolean);
 
   const onCompleteRef = useRef(onComplete);
   useEffect(() => {
@@ -57,6 +61,13 @@ export function FirstRunWizard({ workspacePath, provider, onComplete, onClose, r
         workspacePath 
       });
       setStatus(env);
+
+      try {
+        const info = await invoke<BaselinePackagesInfo>('get_baseline_packages_info', { workspacePath });
+        setBaseline(info);
+      } catch {
+        setBaseline(null);
+      }
       
       // Auto-complete if everything is ready
       if (
@@ -158,15 +169,14 @@ export function FirstRunWizard({ workspacePath, provider, onComplete, onClose, r
     }
   }, [workspacePath, provider, checkEnv]);
 
-  const handleInstallRequestedPackages = useCallback(async () => {
+  const handleInstallEffectPackages = useCallback(async () => {
     if (!workspacePath) return;
-    if (requested.length === 0) return;
     setInstalling(true);
     setLogs([]);
     setLiveInstallLine('');
     setError(null);
     try {
-      await invoke('install_js_packages', { workspacePath, packages: requested });
+      await invoke('install_baseline_packages', { workspacePath });
       await checkEnv();
     } catch (err) {
       setError(String(err));
@@ -174,7 +184,7 @@ export function FirstRunWizard({ workspacePath, provider, onComplete, onClose, r
       setInstalling(false);
       setProgress(null);
     }
-  }, [workspacePath, requested, checkEnv]);
+  }, [workspacePath, checkEnv]);
 
   const handleCancelInstall = useCallback(async () => {
     try {
@@ -271,13 +281,23 @@ export function FirstRunWizard({ workspacePath, provider, onComplete, onClose, r
             <StatusItem label="pnpm Check" passed={status.pnpm_valid} detail={status.details.pnpm?.version} />
             <StatusItem label={`${provider} CLI`} passed={status.provider_cli_valid} detail={status.details.provider_cli?.version} />
             <StatusItem label="Workspace Dependencies" passed={status.workspace_deps_valid} />
-            {requested.length > 0 && (
-              <StatusItem
-                label="Effect Packages"
-                passed={false}
-                detail={`${requested.length} missing`}
-              />
-            )}
+            <StatusItem
+              label="Effect Packages"
+              passed={Boolean(
+                baseline &&
+                  baseline.missing_in_workspace.length === 0 &&
+                  baseline.missing_in_template.length === 0,
+              )}
+              detail={
+                baseline
+                  ? baseline.missing_in_workspace.length === 0 && baseline.missing_in_template.length === 0
+                    ? 'Ready'
+                    : `Workspace ${baseline.missing_in_workspace.length} missing, Template ${baseline.missing_in_template.length} missing`
+                  : loading
+                    ? 'Checking...'
+                    : 'Unknown'
+              }
+            />
             <StatusItem label="Remotion Skills" passed={status.skills_valid} />
             <StatusItem label="Voice-to-Text (whisper.cpp) (Optional)" passed={Boolean(stt?.installed)} detail={stt?.model} />
           </div>
@@ -335,20 +355,25 @@ export function FirstRunWizard({ workspacePath, provider, onComplete, onClose, r
             </div>
           )}
 
-          {!installing && requested.length > 0 && (
+          {!installing &&
+            baseline &&
+            (baseline.missing_in_workspace.length > 0 || baseline.missing_in_template.length > 0) && (
             <div className="mt-6 p-4 bg-slate-950/40 border border-slate-800 rounded-xl">
-              <div className="text-slate-200 font-bold">Effect packages needed by the last prompt</div>
+              <div className="text-slate-200 font-bold">Effect packages (baseline)</div>
               <div className="text-xs text-slate-500 mt-1">
-                The last generated code imported extra packages that are not installed in this project yet.
+                Install the baseline effect packages used by most templates (workspace + template).
               </div>
               <div className="mt-3 max-h-32 overflow-y-auto rounded-lg bg-slate-950 border border-slate-800 p-3 text-xs text-slate-200 font-mono">
-                {requested.join('\n')}
+                {[
+                  ...(baseline.missing_in_workspace || []).map((p) => `workspace: ${p}`),
+                  ...(baseline.missing_in_template || []).map((p) => `template: ${p}`),
+                ].join('\n')}
               </div>
               <div className="mt-4 flex items-center justify-end gap-3">
                 <button
-                  onClick={handleInstallRequestedPackages}
+                  onClick={handleInstallEffectPackages}
                   className="px-4 py-2 rounded-xl bg-indigo-600 text-white font-black hover:bg-indigo-500 transition-colors"
-                  title="Install the extra packages required by the generated code"
+                  title="Install baseline effect packages"
                 >
                   Install effect packages
                 </button>
