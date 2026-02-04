@@ -460,12 +460,24 @@ pub async fn install_missing_dependencies(
 
         if step == "Installing baseline packages" {
             let env_manager = EnvironmentManager::new(app_dir.clone());
+            install_log::log_env_install(
+                Some(&window),
+                Some(&app_dir),
+                Some(&ws_path),
+                "Baseline packages (workspace): checking...",
+            );
             ensure_baseline_packages(&window, &workspace_path, &env_manager).await?;
 
             // Also seed the app-local workspace template (so future new projects start with
             // baseline deps already declared in package.json/pnpm-lock.yaml). Best-effort.
             if let Some(template_dir) = projects::get_mutable_template_dir(&window.app_handle())? {
                 let template_path = template_dir.to_string_lossy().to_string();
+                install_log::log_env_install(
+                    Some(&window),
+                    Some(&app_dir),
+                    Some(&ws_path),
+                    "Baseline packages (template): checking (best-effort for future projects)...",
+                );
                 ensure_baseline_packages(&window, &template_path, &env_manager).await?;
                 cleanup_template_runtime_artifacts(&template_dir);
             }
@@ -802,6 +814,23 @@ async fn run_pnpm_add(
     let saw_done_line_at_sec = std::sync::Arc::new(AtomicU64::new(0));
     let force_killed_after_done = std::sync::Arc::new(AtomicBool::new(false));
 
+    // Heartbeat: pnpm add can appear "stuck" while doing filesystem/network work.
+    // Emit periodic log lines so users know the installer is still running.
+    let done_hb = done.clone();
+    let w_hb = window.clone();
+    let heartbeat_task = tokio::spawn(async move {
+        let mut tick = tokio::time::interval(tokio::time::Duration::from_secs(8));
+        loop {
+            tick.tick().await;
+            if done_hb.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            let secs = started_at.elapsed().as_secs();
+            let line = format!("pnpm add still running ({}s)...", secs);
+            let _ = w_hb.emit("env_install_log", line);
+        }
+    });
+
     let stdout = child.stdout.take().ok_or("Failed to capture pnpm stdout (add)")?;
     let stderr = child.stderr.take().ok_or("Failed to capture pnpm stderr (add)")?;
     let mut stdout_reader = BufReader::new(stdout).lines();
@@ -891,6 +920,7 @@ async fn run_pnpm_add(
     done.store(true, Ordering::SeqCst);
     let _ = stdout_task.await;
     let _ = stderr_task.await;
+    let _ = heartbeat_task.await;
     let _ = cancel_watch.await;
     let _ = done_hang_watch.await;
 
