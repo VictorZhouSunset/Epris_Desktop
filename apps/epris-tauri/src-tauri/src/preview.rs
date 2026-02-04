@@ -65,6 +65,10 @@ pub fn start_preview_server(
     let current_path = std::env::var("PATH").unwrap_or_default();
     let new_path = format!("{}{}{}", toolchain_bin.to_string_lossy(), path_sep, current_path);
     cmd.env("PATH", new_path);
+    // Reduce unreadable ANSI escape sequences in preview.log.
+    cmd.env("NO_COLOR", "1");
+    cmd.env("FORCE_COLOR", "0");
+    cmd.env("TERM", "dumb");
 
     cmd.stdout(Stdio::from(log_file.try_clone().map_err(|e| e.to_string())?));
     cmd.stderr(Stdio::from(log_file));
