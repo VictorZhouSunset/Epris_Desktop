@@ -12,12 +12,15 @@ interface SettingsProps {
   onClose: () => void;
   currentProvider: string;
   onProviderChange: (provider: string) => void;
+  workspacePath?: string;
 }
 
 interface EnvStatus {
   node_valid: boolean;
   pnpm_valid: boolean;
   provider_cli_valid: boolean;
+  workspace_deps_valid: boolean;
+  skills_valid: boolean;
   missing: string[];
   details: {
     node?: { version: string; source: string };
@@ -26,12 +29,18 @@ interface EnvStatus {
   };
 }
 
+interface BaselinePackagesInfo {
+  signature: string;
+  missing_in_workspace: string[];
+  missing_in_template: string[];
+}
+
 const PROVIDERS = [
   { id: 'opencode', name: 'OpenCode (Local)' },
   { id: 'gemini', name: 'Google Gemini' }
 ];
 
-export function Settings({ onClose, currentProvider, onProviderChange }: SettingsProps) {
+export function Settings({ onClose, currentProvider, onProviderChange, workspacePath }: SettingsProps) {
   const [appVersion, setAppVersion] = useState<string>('');
 
   const [updatePhase, setUpdatePhase] = useState<UpdatePhase>('idle');
@@ -43,6 +52,7 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
   const [geminiKey, setGeminiKey] = useState('');
   
   const [envStatus, setEnvStatus] = useState<EnvStatus | null>(null);
+  const [baselineInfo, setBaselineInfo] = useState<BaselinePackagesInfo | null>(null);
   const [checkingEnv, setCheckingEnv] = useState(false);
   const [installing, setInstalling] = useState(false);
 
@@ -85,7 +95,7 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
     checkAppState();
     checkProjectsRoot();
     checkStt();
-  }, [currentProvider]);
+  }, [currentProvider, workspacePath]);
 
   useEffect(() => {
     const unlisten = listen<string>('stt_install_log', (e) => {
@@ -127,8 +137,22 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
   const checkEnvironment = async () => {
     setCheckingEnv(true);
     try {
-      const status = await IpcService.call<EnvStatus>('GET_ENVIRONMENT_STATUS', { provider: currentProvider });
+      const status = await IpcService.call<EnvStatus>('GET_ENVIRONMENT_STATUS', {
+        provider: currentProvider,
+        workspacePath,
+      });
       setEnvStatus(status);
+
+      if (workspacePath) {
+        try {
+          const info = await IpcService.call<BaselinePackagesInfo>('GET_BASELINE_PACKAGES_INFO', { workspacePath });
+          setBaselineInfo(info);
+        } catch {
+          setBaselineInfo(null);
+        }
+      } else {
+        setBaselineInfo(null);
+      }
     } catch (e) {
       console.error('Failed to check environment:', e);
     } finally {
@@ -147,6 +171,23 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
 
   const canInteractWithUpdater =
     updatePhase !== 'checking' && updatePhase !== 'downloading' && updatePhase !== 'installing';
+
+  const baselineReady = Boolean(
+    !workspacePath ||
+      (baselineInfo &&
+        baselineInfo.missing_in_workspace.length === 0 &&
+        baselineInfo.missing_in_template.length === 0),
+  );
+
+  const isEnvReadyForUi = Boolean(
+    envStatus &&
+      envStatus.node_valid &&
+      envStatus.pnpm_valid &&
+      envStatus.provider_cli_valid &&
+      (!workspacePath || envStatus.workspace_deps_valid) &&
+      (!workspacePath || envStatus.skills_valid) &&
+      baselineReady,
+  );
 
   const handleCheckUpdates = async () => {
     setUpdateError('');
@@ -310,9 +351,13 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
   };
 
   const handleInstallDependencies = async () => {
+    if (!workspacePath) {
+      alert('Open a project first so Epris knows where to install workspace dependencies.');
+      return;
+    }
     setInstalling(true);
     try {
-      await IpcService.call('INSTALL_MISSING_DEPENDENCIES');
+      await IpcService.call('INSTALL_MISSING_DEPENDENCIES', { workspacePath, provider: currentProvider });
       await checkEnvironment();
       alert('Installation complete!'); // Simplified feedback
     } catch (e) {
@@ -543,13 +588,13 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
               <span className="text-sm font-medium text-slate-300">Environment Status</span>
               {checkingEnv ? (
                 <RefreshCw size={14} className="animate-spin text-indigo-400" />
-              ) : envStatus?.missing?.length === 0 ? (
+              ) : isEnvReadyForUi ? (
                  <span className="flex items-center gap-1.5 text-xs font-bold text-emerald-400">
                     <CheckCircle2 size={14} /> Ready
                  </span>
               ) : (
                  <span className="flex items-center gap-1.5 text-xs font-bold text-amber-400">
-                    <AlertCircle size={14} /> Missing Dependencies
+                    <AlertCircle size={14} /> Not Ready
                  </span>
               )}
             </div>
@@ -584,10 +629,95 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
                        <span className="text-[10px] opacity-70 font-mono italic">{envStatus.details.provider_cli.version}</span>
                     )}
                  </div>
+                 <div
+                  className={`col-span-2 flex items-center justify-between px-3 py-2 rounded-lg border ${
+                    !workspacePath
+                      ? 'bg-slate-900/40 border-slate-700 text-slate-400'
+                      : envStatus.workspace_deps_valid
+                        ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-300'
+                        : 'bg-red-500/10 border-red-500/20 text-red-300'
+                  }`}
+                 >
+                  <div className="flex items-center gap-2">
+                    <div
+                      className={`w-2 h-2 rounded-full ${
+                        !workspacePath
+                          ? 'bg-slate-500'
+                          : envStatus.workspace_deps_valid
+                            ? 'bg-emerald-400'
+                            : 'bg-red-400'
+                      }`}
+                    />
+                    Workspace Dependencies
+                  </div>
+                  <span className="text-[10px] opacity-70 font-mono italic">
+                    {!workspacePath ? 'N/A (no project open)' : envStatus.workspace_deps_valid ? 'Ready' : 'Missing'}
+                  </span>
+                 </div>
+                 <div
+                  className={`col-span-2 flex items-center justify-between px-3 py-2 rounded-lg border ${
+                    !workspacePath
+                      ? 'bg-slate-900/40 border-slate-700 text-slate-400'
+                      : envStatus.skills_valid
+                        ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-300'
+                        : 'bg-red-500/10 border-red-500/20 text-red-300'
+                  }`}
+                 >
+                  <div className="flex items-center gap-2">
+                    <div
+                      className={`w-2 h-2 rounded-full ${
+                        !workspacePath
+                          ? 'bg-slate-500'
+                          : envStatus.skills_valid
+                            ? 'bg-emerald-400'
+                            : 'bg-red-400'
+                      }`}
+                    />
+                    Remotion Skills
+                  </div>
+                  <span className="text-[10px] opacity-70 font-mono italic">
+                    {!workspacePath ? 'N/A (no project open)' : envStatus.skills_valid ? 'Ready' : 'Missing'}
+                  </span>
+                 </div>
+                 <div
+                  className={`col-span-2 flex items-center justify-between px-3 py-2 rounded-lg border ${
+                    !workspacePath
+                      ? 'bg-slate-900/40 border-slate-700 text-slate-400'
+                      : baselineInfo &&
+                          baselineInfo.missing_in_workspace.length === 0 &&
+                          baselineInfo.missing_in_template.length === 0
+                        ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-300'
+                        : 'bg-red-500/10 border-red-500/20 text-red-300'
+                  }`}
+                 >
+                  <div className="flex items-center gap-2">
+                    <div
+                      className={`w-2 h-2 rounded-full ${
+                        !workspacePath
+                          ? 'bg-slate-500'
+                          : baselineInfo &&
+                              baselineInfo.missing_in_workspace.length === 0 &&
+                              baselineInfo.missing_in_template.length === 0
+                            ? 'bg-emerald-400'
+                            : 'bg-red-400'
+                      }`}
+                    />
+                    Effect Packages (Baseline)
+                  </div>
+                  <span className="text-[10px] opacity-70 font-mono italic">
+                    {!workspacePath
+                      ? 'N/A (no project open)'
+                      : baselineInfo
+                        ? baselineInfo.missing_in_workspace.length === 0 && baselineInfo.missing_in_template.length === 0
+                          ? 'Ready'
+                          : `Missing (${baselineInfo.missing_in_workspace.length + baselineInfo.missing_in_template.length})`
+                        : 'Checking...'}
+                  </span>
+                 </div>
               </div>
             )}
 
-            {envStatus && envStatus.missing.length > 0 && (
+            {envStatus && !isEnvReadyForUi && (
                <button 
                   onClick={handleInstallDependencies}
                   disabled={installing}

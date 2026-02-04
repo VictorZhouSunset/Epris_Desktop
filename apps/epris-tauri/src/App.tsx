@@ -1274,7 +1274,12 @@ function App() {
 
       {/* Settings Modal */}
       {showSettings && (
-        <Settings onClose={() => setShowSettings(false)} currentProvider={provider} onProviderChange={handleProviderChange} />
+        <Settings
+          onClose={() => setShowSettings(false)}
+          currentProvider={provider}
+          onProviderChange={handleProviderChange}
+          workspacePath={workspacePath}
+        />
       )}
 
       {/* Assets Modal */}
