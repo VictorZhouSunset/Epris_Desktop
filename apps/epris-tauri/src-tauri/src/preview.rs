@@ -5,55 +5,6 @@ use std::io::Write;
 use std::process::Stdio;
 use tauri::Manager;
 
-fn ensure_preview_scaffold(workspace_path: &std::path::Path) -> Result<(), String> {
-    let src_dir = workspace_path.join("src");
-    if !src_dir.exists() {
-        std::fs::create_dir_all(&src_dir).map_err(|e| format!("Failed to create src dir: {}", e))?;
-    }
-
-    // If these files are missing, Vite preview will fail even if node_modules exists.
-    // Only write missing files; do not overwrite user edits.
-    const INDEX_TSX: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../../workspace-template/src/index.tsx"
-    ));
-    const PREVIEW_TSX: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../../workspace-template/src/Preview.tsx"
-    ));
-    const COMPOSITION_TSX: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../../workspace-template/src/Composition.tsx"
-    ));
-    const ROOT_TSX: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../../workspace-template/src/Root.tsx"
-    ));
-
-    let files: &[(&str, &str)] = &[
-        ("index.tsx", INDEX_TSX),
-        ("Preview.tsx", PREVIEW_TSX),
-        ("Composition.tsx", COMPOSITION_TSX),
-        ("Root.tsx", ROOT_TSX),
-    ];
-
-    for (name, content) in files {
-        let dst = src_dir.join(name);
-        if dst.exists() {
-            continue;
-        }
-        std::fs::write(&dst, content).map_err(|e| {
-            format!(
-                "Failed to repair missing preview scaffold file {}: {}",
-                dst.to_string_lossy(),
-                e
-            )
-        })?;
-    }
-
-    Ok(())
-}
-
 pub struct PreviewServerState {
     pub process: Option<Child>,
     pub port: u16,
@@ -88,9 +39,6 @@ pub fn start_preview_server(
     if !node_modules.exists() {
         return Err("Workspace dependencies are missing (node_modules not found). Run the First Run Wizard / pnpm install for this project first.".to_string());
     }
-
-    // Repair missing scaffold files (e.g. src/index.tsx) so Vite can start.
-    ensure_preview_scaffold(std::path::Path::new(&workspace_path))?;
 
     let logs_dir = std::path::Path::new(&workspace_path).join("logs");
     let _ = std::fs::create_dir_all(&logs_dir);
