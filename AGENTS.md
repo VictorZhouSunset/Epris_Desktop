@@ -24,6 +24,7 @@ Right now, I am implementing the V0.5 plan, which is in docs\epris_v_0.5.md.
 
 **Key Notice**: You are working in a WSL sandbox, so some "pnpm" operation will be in conflict with my "pnpm" in Windows, such as pnpm i, pnpm reinstall, node-gyp, etc. Try not to do these by yourself, ask me to do it on Windows side.
 I write a script in scripts folder (bootstrap-wsl.sh), running it should give you ability to run cargo tests.
+You **should not** fix a problem by patches or circulate the problem, you need to first discuss with me, and study the codebase thorough so that we agree on the problem, then you can come up with a solid solution.
 
 You **can** deviate from the requirements below (especially when you are explicitly asked to use the framework other than those listed below), but if you do so, you **must** provide detailed explanation and **seek approval or confirmation before** you execute on these.
 

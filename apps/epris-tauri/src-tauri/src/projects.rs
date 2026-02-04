@@ -10,6 +10,8 @@ use tauri::Manager;
 
 #[cfg(any(test, not(debug_assertions)))]
 use include_dir::{include_dir, Dir};
+#[cfg(any(test, not(debug_assertions)))]
+use include_dir::DirEntry;
 
 #[cfg(any(test, not(debug_assertions)))]
 static WORKSPACE_TEMPLATE_EMBEDDED: Dir<'static> =
@@ -22,14 +24,26 @@ fn extract_embedded_template_to(dst_root: &Path, version: &str) -> Result<(), St
     }
     std::fs::create_dir_all(dst_root).map_err(|e| e.to_string())?;
 
-    for file in WORKSPACE_TEMPLATE_EMBEDDED.files() {
-        let rel = file.path();
-        let dst = dst_root.join(rel);
-        if let Some(parent) = dst.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    fn write_dir(dst_root: &Path, dir: &Dir<'_>) -> Result<(), String> {
+        for entry in dir.entries() {
+            match entry {
+                DirEntry::File(file) => {
+                    let rel = file.path();
+                    let dst = dst_root.join(rel);
+                    if let Some(parent) = dst.parent() {
+                        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                    }
+                    std::fs::write(&dst, file.contents()).map_err(|e| e.to_string())?;
+                }
+                DirEntry::Dir(child) => {
+                    write_dir(dst_root, child)?;
+                }
+            }
         }
-        std::fs::write(&dst, file.contents()).map_err(|e| e.to_string())?;
+        Ok(())
     }
+
+    write_dir(dst_root, &WORKSPACE_TEMPLATE_EMBEDDED)?;
 
     std::fs::write(dst_root.join(".epris-template-version"), format!("{}\n", version))
         .map_err(|e| e.to_string())?;
@@ -48,7 +62,13 @@ fn ensure_embedded_template_dir(app_handle: &tauri::AppHandle) -> Result<PathBuf
 
     let mut needs_extract = true;
     if let Ok(existing) = std::fs::read_to_string(&version_file) {
-        if existing.trim() == current_version && template_dir.join("package.json").exists() {
+        let looks_complete = template_dir.join("package.json").exists()
+            && template_dir.join("src").join("Root.tsx").exists()
+            && template_dir.join("src").join("Preview.tsx").exists()
+            && template_dir.join("src").join("Composition.tsx").exists()
+            && template_dir.join("src").join("index.tsx").exists()
+            && template_dir.join("src").join("VideoConfig.ts").exists();
+        if existing.trim() == current_version && looks_complete {
             needs_extract = false;
         }
     }
@@ -304,6 +324,12 @@ mod tests {
         extract_embedded_template_to(&dst, "0.0.0-test").unwrap();
         assert!(dst.join("package.json").exists());
         assert!(dst.join(".epris-template-version").exists());
+        // Regression: ensure nested directories are extracted (src/*.tsx files must exist).
+        assert!(dst.join("src").join("Root.tsx").exists());
+        assert!(dst.join("src").join("Preview.tsx").exists());
+        assert!(dst.join("src").join("Composition.tsx").exists());
+        assert!(dst.join("src").join("index.tsx").exists());
+        assert!(dst.join("src").join("VideoConfig.ts").exists());
     }
 }
 
