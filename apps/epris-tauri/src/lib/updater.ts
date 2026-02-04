@@ -25,6 +25,17 @@ export async function checkForUpdate(): Promise<Update | null> {
     await appendUpdaterLog('check: none');
     return null;
   }
+  try {
+    const anyUpdate = update as any;
+    const keys = Object.keys(anyUpdate || {}).sort();
+    await appendUpdaterLog(`check: update keys -> ${keys.join(', ')}`);
+    for (const k of ['downloadUrl', 'url', 'path', 'signature', 'date']) {
+      const v = anyUpdate?.[k];
+      if (v) await appendUpdaterLog(`check: ${k} -> ${String(v)}`);
+    }
+  } catch {
+    // ignore
+  }
   await appendUpdaterLog(`check: available -> ${update.version} (current ${update.currentVersion})`);
   return update;
 }
@@ -34,4 +45,3 @@ export async function downloadAndInstall(update: Update): Promise<void> {
   await update.downloadAndInstall();
   await appendUpdaterLog(`downloadAndInstall: done -> ${update.version}`);
 }
-

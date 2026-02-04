@@ -19,10 +19,27 @@ static WORKSPACE_TEMPLATE_EMBEDDED: Dir<'static> =
 
 #[cfg(any(test, not(debug_assertions)))]
 fn extract_embedded_template_to(dst_root: &Path, version: &str) -> Result<(), String> {
-    if dst_root.exists() {
-        let _ = std::fs::remove_dir_all(dst_root);
+    // Extract into a temp directory first, then swap it into place. This prevents partially
+    // extracted templates (e.g. if the app is terminated during an update/install).
+    let parent = dst_root
+        .parent()
+        .ok_or_else(|| "Template destination has no parent directory".to_string())?;
+    let tmp_dir = parent.join(format!(
+        ".workspace-template.tmp-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let backup_dir = parent.join(format!(
+        ".workspace-template.old-{}",
+        uuid::Uuid::new_v4()
+    ));
+
+    if tmp_dir.exists() {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
     }
-    std::fs::create_dir_all(dst_root).map_err(|e| e.to_string())?;
+    if backup_dir.exists() {
+        let _ = std::fs::remove_dir_all(&backup_dir);
+    }
+    std::fs::create_dir_all(&tmp_dir).map_err(|e| e.to_string())?;
 
     fn write_dir(dst_root: &Path, dir: &Dir<'_>) -> Result<(), String> {
         for entry in dir.entries() {
@@ -43,10 +60,29 @@ fn extract_embedded_template_to(dst_root: &Path, version: &str) -> Result<(), St
         Ok(())
     }
 
-    write_dir(dst_root, &WORKSPACE_TEMPLATE_EMBEDDED)?;
+    write_dir(&tmp_dir, &WORKSPACE_TEMPLATE_EMBEDDED)?;
 
-    std::fs::write(dst_root.join(".epris-template-version"), format!("{}\n", version))
+    std::fs::write(tmp_dir.join(".epris-template-version"), format!("{}\n", version))
         .map_err(|e| e.to_string())?;
+
+    if dst_root.exists() {
+        if std::fs::rename(dst_root, &backup_dir).is_err() {
+            let _ = std::fs::remove_dir_all(dst_root);
+        }
+    }
+
+    if let Err(e) = std::fs::rename(&tmp_dir, dst_root) {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        if backup_dir.exists() && !dst_root.exists() {
+            let _ = std::fs::rename(&backup_dir, dst_root);
+        }
+        return Err(e.to_string());
+    }
+
+    if backup_dir.exists() {
+        let _ = std::fs::remove_dir_all(&backup_dir);
+    }
+
     Ok(())
 }
 

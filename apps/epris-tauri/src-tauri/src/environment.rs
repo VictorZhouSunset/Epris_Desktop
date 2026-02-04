@@ -179,7 +179,13 @@ impl EnvironmentManager {
  
         // Check Provider (opencode or gemini)
         let cmd = if provider == "gemini" { "gemini" } else { "opencode" };
-        match self.check_command_any(cmd, &[&["--version"], &["version"]]) {
+        let candidates: &[&[&str]] = &[
+            &["--version"],
+            &["version"],
+            &["--help"],
+            &["help"],
+        ];
+        match self.check_command_any(cmd, candidates) {
             Ok(v) => {
                 status.provider_cli_valid = true;
                 let source = self.detect_source_from_where(cmd).unwrap_or_else(|| {
@@ -198,17 +204,7 @@ impl EnvironmentManager {
                 });
             }
             Err(_) => {
-                // Some CLIs may not support `--version` but still exist on PATH.
-                if self.command_exists(cmd).is_some() {
-                    status.provider_cli_valid = true;
-                    let source = self.detect_source_from_where(cmd).unwrap_or_else(|| "system".to_string());
-                    status.details.provider_cli = Some(ToolchainVersion {
-                        version: "unknown".into(),
-                        source: source.into(),
-                    });
-                } else {
-                    status.missing.push(cmd.into());
-                }
+                status.missing.push(cmd.into());
             }
         };
  

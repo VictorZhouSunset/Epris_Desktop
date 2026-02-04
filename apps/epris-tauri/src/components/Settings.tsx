@@ -398,7 +398,24 @@ export function Settings({ onClose, currentProvider, onProviderChange, workspace
     }
   };
 
+  const geminiCliReady = Boolean(currentProvider === 'gemini' && envStatus?.provider_cli_valid);
+
+  const handleOpenAiStudio = async () => {
+    try {
+      await IpcService.call('OPEN_GEMINI_LOGIN');
+    } catch (e) {
+      console.error('Failed to open AI Studio:', e);
+    }
+  };
+
   const handleLogin = async () => {
+    if (!geminiCliReady) {
+      const ok = confirm('Gemini CLI is not installed yet. Open the Setup Wizard to install it now?');
+      if (ok) {
+        await handleOpenSetupWizard();
+      }
+      return;
+    }
     try {
       await invoke('open_gemini_auth_terminal');
       // Poll for auth status
@@ -882,13 +899,14 @@ export function Settings({ onClose, currentProvider, onProviderChange, workspace
                            Use your existing Google subscription. This requires authenticating via the system terminal.
                         </p>
                         
-                        <button 
-                           onClick={handleLogin}
-                           className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm font-bold flex items-center justify-center gap-2 transition-all shadow-lg shadow-indigo-900/20 active:scale-95"
-                        >
-                           <Terminal size={16} />
-                           Authenticate via Terminal
-                        </button>
+	                        <button 
+	                           onClick={handleLogin}
+	                           disabled={!geminiCliReady}
+	                           className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 disabled:hover:bg-indigo-600 text-white rounded-lg text-sm font-bold flex items-center justify-center gap-2 transition-all shadow-lg shadow-indigo-900/20 active:scale-95 disabled:opacity-60 disabled:cursor-not-allowed"
+	                        >
+	                           <Terminal size={16} />
+	                           Authenticate via Terminal
+	                        </button>
                         
                         <p className="text-[10px] text-slate-500 mt-3 text-center">
                            A new window will open. Follow the instructions to log in.
@@ -917,12 +935,12 @@ export function Settings({ onClose, currentProvider, onProviderChange, workspace
                               Save
                             </button>
                         </div>
-                        <button 
-                           onClick={handleLogin}
-                           className="mt-3 text-[10px] text-slate-500 hover:text-slate-300 flex items-center gap-1 transition-colors"
-                        >
-                          Need a key? Get one from AI Studio <LogIn size={10} />
-                        </button>
+	                        <button 
+	                           onClick={handleOpenAiStudio}
+	                           className="mt-3 text-[10px] text-slate-500 hover:text-slate-300 flex items-center gap-1 transition-colors"
+	                        >
+	                          Need a key? Get one from AI Studio <LogIn size={10} />
+	                        </button>
                      </div>
                   </div>
                 </div>
