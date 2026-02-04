@@ -1279,6 +1279,10 @@ function App() {
           currentProvider={provider}
           onProviderChange={handleProviderChange}
           workspacePath={workspacePath}
+          onOpenSetupWizard={() => {
+            setWizardDismissed(false);
+            setShowWizard(true);
+          }}
         />
       )}
 

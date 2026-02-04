@@ -13,6 +13,7 @@ interface SettingsProps {
   currentProvider: string;
   onProviderChange: (provider: string) => void;
   workspacePath?: string;
+  onOpenSetupWizard?: () => void;
 }
 
 interface EnvStatus {
@@ -40,7 +41,7 @@ const PROVIDERS = [
   { id: 'gemini', name: 'Google Gemini' }
 ];
 
-export function Settings({ onClose, currentProvider, onProviderChange, workspacePath }: SettingsProps) {
+export function Settings({ onClose, currentProvider, onProviderChange, workspacePath, onOpenSetupWizard }: SettingsProps) {
   const [appVersion, setAppVersion] = useState<string>('');
 
   const [updatePhase, setUpdatePhase] = useState<UpdatePhase>('idle');
@@ -54,7 +55,6 @@ export function Settings({ onClose, currentProvider, onProviderChange, workspace
   const [envStatus, setEnvStatus] = useState<EnvStatus | null>(null);
   const [baselineInfo, setBaselineInfo] = useState<BaselinePackagesInfo | null>(null);
   const [checkingEnv, setCheckingEnv] = useState(false);
-  const [installing, setInstalling] = useState(false);
 
   const [projectsRoot, setProjectsRoot] = useState<string>('');
   const [movingProjects, setMovingProjects] = useState(false);
@@ -350,21 +350,17 @@ export function Settings({ onClose, currentProvider, onProviderChange, workspace
     }
   };
 
-  const handleInstallDependencies = async () => {
+  const handleOpenSetupWizard = async () => {
     if (!workspacePath) {
-      alert('Open a project first so Epris knows where to install workspace dependencies.');
+      alert('Open a project first so Epris knows which workspace to set up.');
       return;
     }
-    setInstalling(true);
-    try {
-      await IpcService.call('INSTALL_MISSING_DEPENDENCIES', { workspacePath, provider: currentProvider });
-      await checkEnvironment();
-      alert('Installation complete!'); // Simplified feedback
-    } catch (e) {
-      alert('Installation failed: ' + e);
-    } finally {
-      setInstalling(false);
+    if (!onOpenSetupWizard) {
+      alert('Setup wizard is not available from this screen. Close Settings and use the Setup button in the status bar.');
+      return;
     }
+    onClose();
+    onOpenSetupWizard();
   };
 
   const handleResetUserData = async () => {
@@ -718,14 +714,15 @@ export function Settings({ onClose, currentProvider, onProviderChange, workspace
             )}
 
             {envStatus && !isEnvReadyForUi && (
-               <button 
-                  onClick={handleInstallDependencies}
-                  disabled={installing}
-                  className="w-full py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold flex items-center justify-center gap-2 disabled:opacity-50 transition-all"
-               >
-                 {installing ? <RefreshCw size={14} className="animate-spin" /> : <Download size={14} />}
-                 {installing ? 'Installing to Toolchain...' : 'Install Missing Dependencies'}
-               </button>
+              <button
+                onClick={handleOpenSetupWizard}
+                disabled={!workspacePath}
+                className="w-full py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold flex items-center justify-center gap-2 disabled:opacity-50 transition-all"
+                title={!workspacePath ? 'Open a project first' : 'Open the setup wizard'}
+              >
+                <Download size={14} />
+                Open Setup Wizard
+              </button>
             )}
           </div>
 
