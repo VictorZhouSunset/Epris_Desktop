@@ -1321,7 +1321,7 @@ function App() {
           <div className="absolute inset-0 bg-black/60" />
           <div className="relative w-full max-w-lg mx-4 rounded-2xl bg-slate-900 border border-slate-700 shadow-2xl p-6">
             <div className="text-lg font-black text-slate-100">
-              AI thinks this video needs a dependency package that is not yet installed
+              This video needs extra effect packages that are not installed yet
             </div>
             <div className="text-sm text-slate-400 mt-2">
               Required packages:

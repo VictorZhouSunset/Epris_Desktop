@@ -271,7 +271,13 @@ export function FirstRunWizard({ workspacePath, provider, onComplete, onClose, r
             <StatusItem label="pnpm Check" passed={status.pnpm_valid} detail={status.details.pnpm?.version} />
             <StatusItem label={`${provider} CLI`} passed={status.provider_cli_valid} detail={status.details.provider_cli?.version} />
             <StatusItem label="Workspace Dependencies" passed={status.workspace_deps_valid} />
-            <StatusItem label="AI Requested Packages" passed={requested.length === 0} detail={requested.length ? `${requested.length} missing` : undefined} />
+            {requested.length > 0 && (
+              <StatusItem
+                label="Effect Packages"
+                passed={false}
+                detail={`${requested.length} missing`}
+              />
+            )}
             <StatusItem label="Remotion Skills" passed={status.skills_valid} />
             <StatusItem label="Voice-to-Text (whisper.cpp) (Optional)" passed={Boolean(stt?.installed)} detail={stt?.model} />
           </div>
@@ -331,9 +337,9 @@ export function FirstRunWizard({ workspacePath, provider, onComplete, onClose, r
 
           {!installing && requested.length > 0 && (
             <div className="mt-6 p-4 bg-slate-950/40 border border-slate-800 rounded-xl">
-              <div className="text-slate-200 font-bold">AI requested packages</div>
+              <div className="text-slate-200 font-bold">Effect packages needed by the last prompt</div>
               <div className="text-xs text-slate-500 mt-1">
-                The last generated code imported packages that are not installed in this project yet.
+                The last generated code imported extra packages that are not installed in this project yet.
               </div>
               <div className="mt-3 max-h-32 overflow-y-auto rounded-lg bg-slate-950 border border-slate-800 p-3 text-xs text-slate-200 font-mono">
                 {requested.join('\n')}
@@ -342,9 +348,9 @@ export function FirstRunWizard({ workspacePath, provider, onComplete, onClose, r
                 <button
                   onClick={handleInstallRequestedPackages}
                   className="px-4 py-2 rounded-xl bg-indigo-600 text-white font-black hover:bg-indigo-500 transition-colors"
-                  title="Install the packages required by the generated code"
+                  title="Install the extra packages required by the generated code"
                 >
-                  Install requested packages
+                  Install effect packages
                 </button>
               </div>
             </div>
