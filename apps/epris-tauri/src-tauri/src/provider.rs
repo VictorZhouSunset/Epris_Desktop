@@ -167,6 +167,9 @@ impl ProviderManager {
         let opencode_dir = ws.join(".opencode");
         let gemini_settings = gemini_dir.join("settings.json");
         let opencode_config = opencode_dir.join("opencode.json");
+        let non_interactive_note = "\n\
+                **Important:** The user cannot respond to questions or confirm plans in the middle of this run.\n\
+                Do **not** ask for confirmation or wait for replies; execute your plan end-to-end using tools (read/edit files, then verify).\n\n";
 
         // Clean up legacy GEMINI.md if it exists
         let old_gemini_md = ws.join("GEMINI.md");
@@ -178,6 +181,8 @@ impl ProviderManager {
             let rules = "# Remotion Minimal Rules\n\n\
                 ## Goal\n\n\
                 Enable fast, safe Remotion video generation for an initial version. Prioritize simplicity and successful rendering over architectural completeness.\n\n\
+                **Important:** The user cannot respond to questions or confirm plans in the middle of this run.\n\
+                Do **not** ask for confirmation or wait for replies; execute your plan end-to-end using tools (read/edit files, then verify).\n\n\
                 ## Dependency Policy (Important)\n\n\
                 - DO NOT install npm packages automatically.\n\
                 - DO NOT run pnpm/npm/yarn/bun.\n\
@@ -218,6 +223,21 @@ impl ProviderManager {
                 ## 5. Principle\n\n\
                 - Favor working output and clarity over perfect structure. Start simple; introduce structure only when necessary.";
             std::fs::write(&remotion_md, rules).map_err(|e| e.to_string())?;
+        } else if let Ok(existing) = std::fs::read_to_string(&remotion_md) {
+            // Keep this idempotent: only inject the note if it's missing.
+            // This helps reduce "plan-only then exit" behavior for single-run CLIs.
+            let needs_note = !existing.contains("The user cannot respond to questions or confirm plans")
+                && !existing.contains("Do **not** ask for confirmation or wait for replies");
+            if needs_note {
+                let updated = if let Some(idx) = existing.find("## Dependency Policy") {
+                    let mut s = existing.clone();
+                    s.insert_str(idx, non_interactive_note);
+                    s
+                } else {
+                    format!("{}{}", non_interactive_note.trim_start(), existing)
+                };
+                let _ = std::fs::write(&remotion_md, updated);
+            }
         }
 
         if !gemini_dir.exists() {
