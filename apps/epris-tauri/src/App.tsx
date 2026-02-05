@@ -42,7 +42,12 @@ function App() {
   const [showAssets, setShowAssets] = useState(false);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [showWizard, setShowWizard] = useState(false);
+  const [wizardDismissed, setWizardDismissed] = useState(false);
   const [isEnvReady, setIsEnvReady] = useState(false);
+  const [linkingDeps, setLinkingDeps] = useState(false);
+  const [linkingProgress, setLinkingProgress] = useState<{ step: string; percent: number } | null>(null);
+  const linkingForWorkspaceRef = useRef<string>('');
+  const baselinePromptedSignatureRef = useRef<string>('');
 
   const [showCreateProject, setShowCreateProject] = useState(false);
   const [defaultProjectsRoot, setDefaultProjectsRoot] = useState('');
@@ -110,7 +115,7 @@ function App() {
     error: previewError,
     start: startPreview,
   } = usePreviewServer(workspacePath, isEnvReady);
-  const { status: openCodeStatus } = useOpenCode(workspacePath, isEnvReady);
+  const { status: openCodeStatus, error: openCodeError } = useOpenCode(workspacePath, isEnvReady);
   const previewUrl = previewStatus === 'running' && port ? `http://127.0.0.1:${port}` : null;
 
   const { waitPort } = useWaitPort();
@@ -127,6 +132,12 @@ function App() {
     return `${workspacePath}${sep}logs${sep}preview.log`;
   }, [workspacePath]);
 
+  const opencodeLogPath = useMemo(() => {
+    if (!workspacePath) return '';
+    const sep = workspacePath.includes('\\') ? '\\' : '/';
+    return `${workspacePath}${sep}logs${sep}opencode.log`;
+  }, [workspacePath]);
+
   const {
     status: promptStatus,
     progress: promptProgress,
@@ -135,6 +146,7 @@ function App() {
     lastResponse,
     sendPrompt,
     clearSession,
+    revalidateGate,
   } = usePrompt(
     workspacePath,
     {
@@ -379,31 +391,129 @@ function App() {
   // Check Environment on mount/provider change
   useEffect(() => {
     if (!workspacePath) return;
+    // While the setup wizard is open, let the wizard own environment checks.
+    // Otherwise, this background poll can race the install flow and close/reopen the modal.
+    let canceled = false;
+    if (showWizard) {
+      return () => {
+        canceled = true;
+      };
+    }
     const checkEnv = async () => {
       try {
         const status = await invoke<any>('get_environment_status', {
           provider,
           workspacePath,
         });
-        const ready =
-          status.node_valid &&
-          status.pnpm_valid &&
-          status.provider_cli_valid &&
-          status.workspace_deps_valid &&
-          status.skills_valid;
-        setIsEnvReady(ready);
-        if (!ready) setShowWizard(true);
+        if (canceled) return;
+        const toolchainReady =
+          status.node_valid && status.pnpm_valid && status.provider_cli_valid && status.skills_valid;
+        const depsReady = Boolean(status.workspace_deps_valid);
+        const ready = toolchainReady && depsReady;
+
+        const maybePromptBaselinePackages = async (manageProgress: boolean) => {
+          if (!toolchainReady) return;
+          try {
+            const info = await invoke<{
+              signature: string;
+              missing_in_workspace: string[];
+              missing_in_template: string[];
+            }>('get_baseline_packages_info', { workspacePath });
+            const appState = await invoke<any>('get_app_state');
+            const ack = String(appState?.baseline_packages_ack || '');
+            const signature = String(info?.signature || '');
+            const missing = [
+              ...(info?.missing_in_template || []),
+              ...(info?.missing_in_workspace || []),
+            ].filter(Boolean);
+            if (!signature || missing.length === 0) return;
+            if (ack === signature) return;
+            if (baselinePromptedSignatureRef.current === signature) return;
+            baselinePromptedSignatureRef.current = signature;
+
+            const ok = confirm(
+              `This version adds baseline JavaScript packages:\n\n- ${missing.join(
+                '\n- ',
+              )}\n\nInstall them now? (You will only be asked once per app update.)`,
+            );
+            if (!ok) {
+              await invoke('set_baseline_packages_ack', { signature });
+              return;
+            }
+
+            if (manageProgress) {
+              setLinkingDeps(true);
+              setLinkingProgress({ step: 'Installing baseline packages', percent: 0 });
+            }
+            try {
+              await invoke('install_baseline_packages', { workspacePath });
+              await invoke('set_baseline_packages_ack', { signature });
+            } catch (e) {
+              baselinePromptedSignatureRef.current = '';
+              throw e;
+            } finally {
+              if (manageProgress) setLinkingDeps(false);
+            }
+          } catch (e) {
+            console.error('Baseline packages check failed:', e);
+          }
+        };
+
+        if (ready) {
+          setIsEnvReady(true);
+          setShowWizard(false);
+          setWizardDismissed(false);
+          setLinkingDeps(false);
+          void maybePromptBaselinePackages(true);
+          return;
+        }
+
+        // If only workspace deps are missing, silently link them (no modal wizard).
+        if (toolchainReady && !depsReady) {
+          setIsEnvReady(false);
+          setShowWizard(false);
+          if (linkingForWorkspaceRef.current !== workspacePath) {
+            linkingForWorkspaceRef.current = workspacePath;
+            setLinkingDeps(true);
+            setLinkingProgress({ step: 'Linking dependencies', percent: 0 });
+            try {
+              await maybePromptBaselinePackages(false);
+              await invoke('link_workspace_dependencies', { workspacePath });
+              setIsEnvReady(true);
+            } catch (e) {
+              console.error('Failed to link deps:', e);
+              setShowWizard(true);
+            } finally {
+              setLinkingDeps(false);
+            }
+          }
+          return;
+        }
+
+        setIsEnvReady(false);
+        if (wizardDismissed) {
+          setShowWizard(false);
+        } else {
+          setShowWizard(true);
+        }
       } catch (e) {
         console.error('Failed to check env:', e);
       }
     };
     checkEnv();
-  }, [workspacePath, provider]);
+    return () => {
+      canceled = true;
+    };
+  }, [workspacePath, provider, wizardDismissed, showWizard]);
 
   // Step 13: default provider when opening a project
   useEffect(() => {
     setIsEnvReady(false);
     setShowWizard(false);
+    setWizardDismissed(false);
+    setLinkingDeps(false);
+    setLinkingProgress(null);
+    linkingForWorkspaceRef.current = '';
     if (!workspacePath) return;
     setProvider('opencode');
     setModel('opencode/big-pickle');
@@ -420,6 +530,20 @@ function App() {
       localStorage.setItem('epris:parametersPanelOpen', isParametersPanelOpen ? '1' : '0');
     } catch {}
   }, [isParametersPanelOpen]);
+
+  // Track env install progress even when wizard isn't shown (e.g. linking deps).
+  useEffect(() => {
+    const unlisten = listen<any>('env_install_progress', (e) => {
+      const p = e.payload || {};
+      const step = String(p.step || '');
+      const percent = typeof p.percent === 'number' ? p.percent : null;
+      if (!step || percent === null) return;
+      setLinkingProgress({ step, percent });
+    });
+    return () => {
+      unlisten.then((f) => f());
+    };
+  }, []);
 
   const handleProviderChange = useCallback((newProvider: string) => {
     setProvider(newProvider);
@@ -458,11 +582,10 @@ function App() {
   const handleViewLogs = useCallback(async () => {
     if (!workspacePath) return;
     try {
-      const logPath = `${workspacePath}\\logs\\gate.jsonl`;
-      await openPath(logPath);
+      await openPath(`${workspacePath}\\logs`);
     } catch (err) {
       console.error('Failed to open logs:', err);
-      alert('Failed to open logs. Check: ' + workspacePath + '\\logs\\gate.jsonl');
+      alert('Failed to open logs. Check: ' + workspacePath + '\\logs');
     }
   }, [workspacePath]);
 
@@ -563,6 +686,51 @@ function App() {
     [overview, renameProject],
   );
 
+  const isReady = Boolean(workspacePath) && previewStatus === 'running' && openCodeStatus === 'running' && isEnvReady;
+  const isProcessing = promptStatus === 'sending';
+  const hasGateError = promptStatus === 'error';
+  const gateFailed = Boolean(lastResponse?.gate_result && !lastResponse.gate_result.passed);
+
+  const missingPackages = useMemo(() => {
+    const err = lastResponse?.gate_result?.error_output || lastResponse?.gate_result?.error || '';
+    const found: string[] = [];
+
+    const parseDepRequestLine = (line: string) => {
+      const after = line.split(':').slice(1).join(':');
+      for (const raw of after.split(',')) {
+        const name = raw.trim().split(/\s+/)[0];
+        if (!name) continue;
+        if (name.startsWith('.') || name.startsWith('/') || name.includes('\\')) continue;
+        if (!found.includes(name)) found.push(name);
+      }
+    };
+
+    const msg = String(lastResponse?.message || '');
+    const reqLineMsg = msg.split('\n').find((l) => l.trim().toUpperCase().startsWith('DEPENDENCY_REQUEST:'));
+    if (reqLineMsg) parseDepRequestLine(reqLineMsg);
+
+    const reqLineErr = err.split('\n').find((l) => l.trim().toUpperCase().startsWith('DEPENDENCY_REQUEST:'));
+    if (reqLineErr) parseDepRequestLine(reqLineErr);
+
+    if (!err) return found;
+
+    const patterns = [
+      /Cannot find module ['"]([^'"]+)['"]/g,
+      /Error:\s*Cannot find module ['"]([^'"]+)['"]/g,
+    ];
+
+    for (const re of patterns) {
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(err))) {
+        const name = String(m[1] || '').trim();
+        if (!name) continue;
+        if (name.startsWith('.') || name.startsWith('/') || name.includes('\\')) continue;
+        if (!found.includes(name)) found.push(name);
+      }
+    }
+    return found;
+  }, [lastResponse?.gate_result, lastResponse?.message]);
+
   const overallStatus = useMemo(() => {
     if (!workspacePath) return { text: 'No Project', color: 'bg-slate-500' };
     if (previewStatus === 'starting') return { text: 'Starting Preview...', color: 'bg-yellow-500' };
@@ -575,6 +743,7 @@ function App() {
       const gate = lastResponse?.gate_result;
       if (gate) {
         if (gate.passed) return { text: 'Gate Passed', color: 'bg-emerald-500' };
+        if (missingPackages.length > 0) return { text: 'Needs dependencies', color: 'bg-amber-500' };
         return { text: 'Gate Failed', color: 'bg-amber-500' };
       }
       return { text: 'Ready', color: 'bg-green-500' };
@@ -584,12 +753,69 @@ function App() {
     if (exportStatus === 'error') return { text: 'Export Error', color: 'bg-red-500' };
     if (previewStatus === 'running' && openCodeStatus === 'running') return { text: 'Ready', color: 'bg-emerald-500' };
     return { text: 'Loading...', color: 'bg-slate-500' };
-  }, [workspacePath, previewStatus, openCodeStatus, promptStatus, exportStatus, lastResponse]);
+  }, [workspacePath, previewStatus, openCodeStatus, promptStatus, exportStatus, lastResponse, missingPackages.length]);
 
-  const isReady = Boolean(workspacePath) && previewStatus === 'running' && openCodeStatus === 'running' && isEnvReady;
-  const isProcessing = promptStatus === 'sending';
-  const hasGateError = promptStatus === 'error';
-  const gateFailed = Boolean(lastResponse?.gate_result && !lastResponse.gate_result.passed);
+  const [showDependencyModal, setShowDependencyModal] = useState(false);
+  const [isInstallingMissingPackages, setIsInstallingMissingPackages] = useState(false);
+
+  useEffect(() => {
+    setShowDependencyModal(false);
+    setIsInstallingMissingPackages(false);
+  }, [workspacePath]);
+
+  useEffect(() => {
+    if (!workspacePath) return;
+    if (isProcessing) return;
+    if (!gateFailed) return;
+    if (missingPackages.length === 0) return;
+    setShowDependencyModal(true);
+  }, [gateFailed, isProcessing, missingPackages.length, workspacePath]);
+
+  const handleRevertPreFlight = useCallback(async (opts?: { skipConfirm?: boolean }) => {
+    if (!workspacePath) return;
+    if (!opts?.skipConfirm) {
+      const ok = confirm(
+        `Revert this workspace back to the state before the last prompt?\n\nThis will discard the AI changes from the last run.`,
+      );
+      if (!ok) return;
+    }
+    try {
+      await invoke('restore_pre_flight_backup', { workspacePath });
+      await clearSession();
+      setIframeKey((k) => k + 1);
+      alert('Reverted to pre-prompt state.');
+    } catch (err) {
+      alert(`Revert failed: ${String(err)}`);
+    }
+  }, [clearSession, workspacePath]);
+
+  const handleInstallMissingPackages = useCallback(async (opts?: { skipConfirm?: boolean }) => {
+    if (!workspacePath) return;
+    if (missingPackages.length === 0) return;
+    if (!opts?.skipConfirm) {
+      const ok = confirm(
+        `Install missing packages into this project?\n\n${missingPackages.join('\n')}\n\nThis will modify the project's package.json and pnpm-lock.yaml.`,
+      );
+      if (!ok) {
+        void handleRevertPreFlight();
+        return;
+      }
+    }
+    try {
+      setIsInstallingMissingPackages(true);
+      setLinkingDeps(true);
+      setLinkingProgress({ step: 'Installing dependencies', percent: 0 });
+      await invoke('install_js_packages', { workspacePath, packages: missingPackages });
+      setLinkingProgress({ step: 'Re-validating...', percent: 95 });
+      await revalidateGate();
+    } catch (err) {
+      alert(`Install failed: ${String(err)}`);
+      throw err;
+    } finally {
+      setIsInstallingMissingPackages(false);
+      setLinkingDeps(false);
+    }
+  }, [missingPackages, workspacePath, handleRevertPreFlight, revalidateGate]);
 
   const handleFixGateError = useCallback(async () => {
     if (!workspacePath || !lastResponse?.gate_result) return;
@@ -689,15 +915,17 @@ function App() {
             </div>
           )}
 
-          {gateFailed && !isProcessing && (
-            <button
-              onClick={handleFixGateError}
-              className="hidden lg:flex items-center gap-2 px-3 py-2 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-300 hover:bg-amber-500/15 transition-colors"
-              title="Send Gate error to AI and ask it to fix"
-            >
-              <span className="text-xs font-black uppercase tracking-widest">Gate Failed</span>
-              <span className="text-xs font-bold">Fix with AI</span>
-            </button>
+          {gateFailed && !isProcessing && missingPackages.length === 0 && (
+            <div className="hidden lg:flex items-center gap-2">
+              <button
+                onClick={handleFixGateError}
+                className="flex items-center gap-2 px-3 py-2 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-300 hover:bg-amber-500/15 transition-colors"
+                title="Send Gate error to AI and ask it to fix"
+              >
+                <span className="text-xs font-black uppercase tracking-widest">Gate Failed</span>
+                <span className="text-xs font-bold">Fix with AI</span>
+              </button>
+            </div>
           )}
 
           <button
@@ -1007,6 +1235,20 @@ function App() {
                   </p>
                 )}
 
+                {openCodeStatus === 'error' && (
+                  <p className="px-4 text-sm text-red-400">
+                    AI Error: {openCodeError?.message || 'Unknown error'}
+                    {opencodeLogPath && (
+                      <button
+                        onClick={() => openPath(opencodeLogPath).catch(console.error)}
+                        className="ml-2 underline text-amber-400 hover:text-amber-300"
+                      >
+                        Open opencode.log
+                      </button>
+                    )}
+                  </p>
+                )}
+
                 {exportError && (
                   <p className="px-4 text-sm text-red-400">
                     Export Error: {exportError}
@@ -1051,7 +1293,16 @@ function App() {
 
       {/* Settings Modal */}
       {showSettings && (
-        <Settings onClose={() => setShowSettings(false)} currentProvider={provider} onProviderChange={handleProviderChange} />
+        <Settings
+          onClose={() => setShowSettings(false)}
+          currentProvider={provider}
+          onProviderChange={handleProviderChange}
+          workspacePath={workspacePath}
+          onOpenSetupWizard={() => {
+            setWizardDismissed(false);
+            setShowWizard(true);
+          }}
+        />
       )}
 
       {/* Assets Modal */}
@@ -1066,7 +1317,12 @@ function App() {
           provider={provider}
           onComplete={() => {
             setShowWizard(false);
+            setWizardDismissed(false);
             setIsEnvReady(true);
+          }}
+          onClose={() => {
+            setShowWizard(false);
+            setWizardDismissed(true);
           }}
         />
       )}
@@ -1084,6 +1340,72 @@ function App() {
           }}
           onClose={() => setShowCreateProject(false)}
         />
+      )}
+
+      {/* Dependency Request Modal (missing npm packages detected by Gate) */}
+      {showDependencyModal && workspacePath && missingPackages.length > 0 && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/60" />
+          <div className="relative w-full max-w-lg mx-4 rounded-2xl bg-slate-900 border border-slate-700 shadow-2xl p-6">
+            <div className="text-lg font-black text-slate-100">
+              This video needs extra effect packages that are not installed yet
+            </div>
+            <div className="text-sm text-slate-400 mt-2">
+              Required packages:
+              <div className="mt-2 max-h-40 overflow-auto rounded-xl bg-slate-950/60 border border-slate-800 p-3">
+                <ul className="list-disc pl-5 space-y-1">
+                  {missingPackages.map((p) => (
+                    <li key={p} className="text-slate-200 font-semibold break-words">
+                      {p}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+            {isInstallingMissingPackages && (
+              <div className="mt-4 flex items-center gap-2 text-sm text-indigo-300 font-bold">
+                <RefreshCw size={16} className="animate-spin" />
+                Installing… this may take a moment.
+              </div>
+            )}
+            <div className="mt-5 flex items-center justify-end gap-3">
+              <button
+                onClick={() => setShowDependencyModal(false)}
+                disabled={isInstallingMissingPackages}
+                className="px-4 py-2 rounded-xl bg-slate-800/40 border border-slate-700 text-slate-200 font-bold hover:bg-slate-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                title="Skip for now"
+              >
+                Skip for now
+              </button>
+              <button
+                onClick={async () => {
+                  await handleRevertPreFlight({ skipConfirm: true });
+                  setShowDependencyModal(false);
+                }}
+                disabled={isInstallingMissingPackages}
+                className="px-4 py-2 rounded-xl bg-slate-900/50 border border-slate-700 text-slate-200 font-bold hover:bg-slate-900 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                title="Discard the last AI changes"
+              >
+                Revert pre-prompt
+              </button>
+              <button
+                onClick={async () => {
+                  try {
+                    await handleInstallMissingPackages({ skipConfirm: true });
+                    setShowDependencyModal(false);
+                  } catch {
+                    // handleInstallMissingPackages already alerts on failure.
+                  }
+                }}
+                disabled={isInstallingMissingPackages}
+                className="px-4 py-2 rounded-xl bg-indigo-600 text-white font-black hover:bg-indigo-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                title="Install packages required by the generated code"
+              >
+                {isInstallingMissingPackages ? 'Installing…' : 'Install dependencies'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Status Bar */}
@@ -1104,13 +1426,53 @@ function App() {
           </span>
         </div>
         <div className="flex items-center gap-4">
+          {!isEnvReady && workspacePath && !showWizard && !linkingDeps && (
+            <button
+              onClick={() => {
+                setWizardDismissed(false);
+                setShowWizard(true);
+              }}
+              className="hidden lg:flex items-center gap-2 px-3 py-2 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-200 hover:bg-amber-500/15 transition-colors"
+              title="Open environment setup"
+            >
+              <span className="text-[11px] font-black uppercase tracking-widest">Setup</span>
+              <span className="text-xs font-bold">Install missing deps</span>
+            </button>
+          )}
+          {linkingDeps && linkingProgress && (
+            <span className="hidden lg:flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-800/40 border border-slate-700 text-slate-200 max-w-[420px]">
+              <span className="text-[11px] font-black uppercase tracking-widest text-slate-400">Deps</span>
+              <div className="min-w-0 flex-1">
+                <div className="text-[11px] font-bold truncate">{linkingProgress.step}</div>
+                <div className="w-full bg-slate-800 rounded-full h-1.5 mt-1 overflow-hidden border border-slate-700">
+                  <div
+                    className="bg-indigo-500 h-full transition-all duration-300 ease-out"
+                    style={{ width: `${linkingProgress.percent}%` }}
+                  />
+                </div>
+              </div>
+              <div className="text-[11px] text-slate-400 font-bold tabular-nums shrink-0">
+                {Math.round(linkingProgress.percent)}%
+              </div>
+            </span>
+          )}
+          {gateFailed && missingPackages.length > 0 && !isProcessing && !showDependencyModal && (
+            <button
+              onClick={() => setShowDependencyModal(true)}
+              className="hidden lg:flex items-center gap-2 px-3 py-2 rounded-xl bg-indigo-600/20 border border-indigo-500/30 text-indigo-200 hover:bg-indigo-600/25 transition-colors"
+              title="Install missing packages for the generated code"
+            >
+              <span className="text-[11px] font-black uppercase tracking-widest">Deps</span>
+              <span className="text-xs font-bold">Install Missing ({missingPackages.length})</span>
+            </button>
+          )}
           {lastResponse?.gate_result && (
             <span
               className={`px-2 py-0.5 rounded-full ${
                 lastResponse.gate_result.passed ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'
               }`}
             >
-              G: {lastResponse.gate_result.passed ? 'PASS' : 'FAIL'}
+              G: {lastResponse.gate_result.passed ? 'PASS' : missingPackages.length > 0 ? 'NEEDS DEPS' : 'FAIL'}
               {lastResponse.gate_result.typecheck ? ' T' : ''}
               {lastResponse.gate_result.smoke_0 ? ' S0' : ''}
               {lastResponse.gate_result.smoke_mid ? ' SM' : ''}

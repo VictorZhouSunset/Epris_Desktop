@@ -1,4 +1,5 @@
 use crate::environment::EnvironmentManager;
+use crate::install_log;
 use crate::state_manager::{RemotionSkillState, StateManager};
 use crate::utils;
 use chrono::Utc;
@@ -6,7 +7,6 @@ use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use tauri::Emitter;
 use uuid::Uuid;
 use walkdir::WalkDir;
 use zip::ZipArchive;
@@ -34,32 +34,40 @@ impl SkillsManager {
             .parent()
             .ok_or("Invalid toolchain_dir (no parent)")?
             .to_path_buf();
-        let state_mgr = StateManager::new(app_data_dir);
+        let state_mgr = StateManager::new(app_data_dir.clone());
 
         let source = "github:remotion-dev/skills".to_string();
         let cache_root = toolchain_dir.join("remotion-skills-cache");
 
-        if let Some(w) = window {
-            let _ = w.emit(
-                "env_install_log",
-                "Preparing Remotion skills cache (pinned commit)...".to_string(),
-            );
-        }
+        install_log::log_env_install(
+            window,
+            Some(&app_data_dir),
+            Some(ws_path),
+            "Preparing Remotion skills cache (pinned commit)...",
+        );
 
         let desired_commit = match state_mgr.read().toolchain.remotion_skills {
             Some(s) if !s.commit.is_empty() => s.commit,
             _ => {
-                if let Some(w) = window {
-                    let _ = w.emit(
-                        "env_install_log",
-                        "Resolving latest Remotion skills commit...".to_string(),
-                    );
-                }
+                install_log::log_env_install(
+                    window,
+                    Some(&app_data_dir),
+                    Some(ws_path),
+                    "Resolving latest Remotion skills commit...",
+                );
                 resolve_latest_commit(&source).await?
             }
         };
 
-        ensure_cache_for_commit(window, &cache_root, &source, &desired_commit).await?;
+        ensure_cache_for_commit(
+            window,
+            &app_data_dir,
+            ws_path,
+            &cache_root,
+            &source,
+            &desired_commit,
+        )
+        .await?;
 
         // Persist pin (newest-on-first-install, stable thereafter).
         let _ = state_mgr.update(|s| {
@@ -71,19 +79,22 @@ impl SkillsManager {
         })?;
 
         // Project to workspace (both providers, regardless of selected provider).
-        if let Some(w) = window {
-            let _ = w.emit(
-                "env_install_log",
-                "Syncing skills into workspace (.gemini/skills + .opencode/skills)...".to_string(),
-            );
-        }
+        install_log::log_env_install(
+            window,
+            Some(&app_data_dir),
+            Some(ws_path),
+            "Syncing skills into workspace (.gemini/skills + .opencode/skills)...",
+        );
 
         let cache_dir = cache_root.join(&desired_commit);
         sync_skills_into_workspace(&cache_dir, ws_path).map_err(|e| format!("Skill sync failed: {}", e))?;
 
-        if let Some(w) = window {
-            let _ = w.emit("env_install_log", "Skills installed successfully!".to_string());
-        }
+        install_log::log_env_install(
+            window,
+            Some(&app_data_dir),
+            Some(ws_path),
+            "Skills installed successfully!",
+        );
 
         Ok(())
     }
@@ -195,6 +206,8 @@ async fn git_available() -> bool {
 
 async fn ensure_cache_for_commit(
     window: Option<&tauri::Window>,
+    app_data_dir: &Path,
+    workspace_path: &Path,
     cache_root: &Path,
     source: &str,
     commit: &str,
@@ -208,20 +221,23 @@ async fn ensure_cache_for_commit(
 
     // Prefer git-based if available; fall back to archive-based.
     if git_available().await {
-        if let Some(w) = window {
-            let _ = w.emit("env_install_log", "Fetching skills via git...".to_string());
-        }
+        install_log::log_env_install(
+            window,
+            Some(app_data_dir),
+            Some(workspace_path),
+            "Fetching skills via git...",
+        );
         if fetch_via_git(cache_root, commit).await.is_ok() {
             return Ok(());
         }
     }
 
-    if let Some(w) = window {
-        let _ = w.emit(
-            "env_install_log",
-            "Fetching skills via archive download (no git)...".to_string(),
-        );
-    }
+    install_log::log_env_install(
+        window,
+        Some(app_data_dir),
+        Some(workspace_path),
+        "Fetching skills via archive download (no git)...",
+    );
     if source != "github:remotion-dev/skills" {
         return Err(format!("Unknown skills source: {}", source));
     }

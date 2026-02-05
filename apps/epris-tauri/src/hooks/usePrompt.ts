@@ -104,5 +104,53 @@ export function usePrompt(
     }
   }, []);
 
-  return { status, progress, currentStep, error, lastResponse, sendPrompt, clearSession };
+  const revalidateGate = useCallback(async () => {
+    if (!workspacePath) {
+      const err = 'Workspace path is required';
+      setError(err);
+      options?.onError?.(err);
+      return null;
+    }
+
+    setStatus('sending');
+    setProgress(0);
+    setCurrentStep('Gate: Re-validating...');
+    setError(null);
+
+    try {
+      const gate = await IpcService.call<any>('RUN_GATE', { workspacePath });
+
+      setLastResponse((prev) => {
+        if (prev) {
+          return { ...prev, gate_result: gate, success: Boolean(gate?.passed) };
+        }
+        return {
+          success: Boolean(gate?.passed),
+          message: gate?.passed ? 'Gate passed' : 'Gate failed',
+          gate_result: gate,
+        };
+      });
+
+      setStatus('success');
+      setProgress(100);
+      setCurrentStep('Completed');
+      if (gate?.passed) options?.onSuccess?.();
+
+      setTimeout(() => {
+        setStatus('idle');
+        setProgress(0);
+        setCurrentStep('');
+      }, 1200);
+
+      return gate;
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      setError(errorMessage);
+      setStatus('error');
+      options?.onError?.(errorMessage);
+      return null;
+    }
+  }, [workspacePath, options]);
+
+  return { status, progress, currentStep, error, lastResponse, sendPrompt, clearSession, revalidateGate };
 }

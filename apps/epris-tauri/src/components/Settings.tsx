@@ -1,20 +1,27 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { getVersion } from '@tauri-apps/api/app';
 import { listen } from '@tauri-apps/api/event';
 import { X, Cpu, Key, LogIn, CheckCircle2, AlertCircle, Download, RefreshCw, Terminal, FolderOpen } from 'lucide-react';
 import { IpcService } from '../lib/ipc';
+import { checkForUpdate, downloadAndInstall, type UpdatePhase } from '../lib/updater';
+import type { Update } from '@tauri-apps/plugin-updater';
 import type { SttStatus } from '../types/backend';
 
 interface SettingsProps {
   onClose: () => void;
   currentProvider: string;
   onProviderChange: (provider: string) => void;
+  workspacePath?: string;
+  onOpenSetupWizard?: () => void;
 }
 
 interface EnvStatus {
   node_valid: boolean;
   pnpm_valid: boolean;
   provider_cli_valid: boolean;
+  workspace_deps_valid: boolean;
+  skills_valid: boolean;
   missing: string[];
   details: {
     node?: { version: string; source: string };
@@ -23,21 +30,37 @@ interface EnvStatus {
   };
 }
 
+interface BaselinePackagesInfo {
+  signature: string;
+  missing_in_workspace: string[];
+  missing_in_template: string[];
+}
+
 const PROVIDERS = [
   { id: 'opencode', name: 'OpenCode (Local)' },
   { id: 'gemini', name: 'Google Gemini' }
 ];
 
-export function Settings({ onClose, currentProvider, onProviderChange }: SettingsProps) {
+export function Settings({ onClose, currentProvider, onProviderChange, workspacePath, onOpenSetupWizard }: SettingsProps) {
+  const [appVersion, setAppVersion] = useState<string>('');
+
+  const [updatePhase, setUpdatePhase] = useState<UpdatePhase>('idle');
+  const [updateMessage, setUpdateMessage] = useState<string>('');
+  const [updateError, setUpdateError] = useState<string>('');
+  const [availableUpdate, setAvailableUpdate] = useState<Update | null>(null);
+
   const [apiKeyStatus, setApiKeyStatus] = useState<'checking' | 'valid' | 'invalid'>('checking');
   const [geminiKey, setGeminiKey] = useState('');
   
   const [envStatus, setEnvStatus] = useState<EnvStatus | null>(null);
+  const [baselineInfo, setBaselineInfo] = useState<BaselinePackagesInfo | null>(null);
   const [checkingEnv, setCheckingEnv] = useState(false);
-  const [installing, setInstalling] = useState(false);
 
   const [projectsRoot, setProjectsRoot] = useState<string>('');
   const [movingProjects, setMovingProjects] = useState(false);
+
+  const [resetting, setResetting] = useState(false);
+  const [resetAlsoDeleteProjects, setResetAlsoDeleteProjects] = useState(false);
 
   const [stt, setStt] = useState<SttStatus | null>(null);
   const [sttInstalling, setSttInstalling] = useState(false);
@@ -45,8 +68,15 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
   const [sttTask, setSttTask] = useState<'transcribe' | 'translate'>('transcribe');
   const [sttLogs, setSttLogs] = useState<string[]>([]);
   const [sttProgress, setSttProgress] = useState<string>('');
+  const [sttProgressPercent, setSttProgressPercent] = useState<number | null>(null);
+
+  const [debugForceDepReq, setDebugForceDepReq] = useState<string>('');
 
   useEffect(() => {
+    getVersion()
+      .then((v) => setAppVersion(v))
+      .catch(() => setAppVersion(''));
+
     const saved = window.localStorage.getItem('epris_stt_model_selection');
     if (saved === 'tiny' || saved === 'tiny.en' || saved === 'small') {
       setSttModel(saved as 'tiny' | 'tiny.en' | 'small');
@@ -62,9 +92,10 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
       checkAuth();
     }
     checkEnvironment();
+    checkAppState();
     checkProjectsRoot();
     checkStt();
-  }, [currentProvider]);
+  }, [currentProvider, workspacePath]);
 
   useEffect(() => {
     const unlisten = listen<string>('stt_install_log', (e) => {
@@ -80,8 +111,10 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
 
       if (total && percent !== null && total > 0) {
         setSttProgress(`${label}: ${mb(downloaded)} / ${mb(total)} MB (${Math.round(percent)}%)`);
+        setSttProgressPercent(percent);
       } else {
         setSttProgress(`${label}: ${mb(downloaded)} MB`);
+        setSttProgressPercent(null);
       }
     });
     return () => {
@@ -104,12 +137,92 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
   const checkEnvironment = async () => {
     setCheckingEnv(true);
     try {
-      const status = await IpcService.call<EnvStatus>('GET_ENVIRONMENT_STATUS', { provider: currentProvider });
+      const status = await IpcService.call<EnvStatus>('GET_ENVIRONMENT_STATUS', {
+        provider: currentProvider,
+        workspacePath,
+      });
       setEnvStatus(status);
+
+      if (workspacePath) {
+        try {
+          const info = await IpcService.call<BaselinePackagesInfo>('GET_BASELINE_PACKAGES_INFO', { workspacePath });
+          setBaselineInfo(info);
+        } catch {
+          setBaselineInfo(null);
+        }
+      } else {
+        setBaselineInfo(null);
+      }
     } catch (e) {
       console.error('Failed to check environment:', e);
     } finally {
       setCheckingEnv(false);
+    }
+  };
+
+  const checkAppState = async () => {
+    try {
+      const state = await IpcService.call<any>('GET_APP_STATE');
+      setDebugForceDepReq(String(state?.debug_force_dependency_request || ''));
+    } catch (e) {
+      console.error('Failed to read app state:', e);
+    }
+  };
+
+  const canInteractWithUpdater =
+    updatePhase !== 'checking' && updatePhase !== 'downloading' && updatePhase !== 'installing';
+
+  const baselineReady = Boolean(
+    !workspacePath ||
+      (baselineInfo &&
+        baselineInfo.missing_in_workspace.length === 0 &&
+        baselineInfo.missing_in_template.length === 0),
+  );
+
+  const isEnvReadyForUi = Boolean(
+    envStatus &&
+      envStatus.node_valid &&
+      envStatus.pnpm_valid &&
+      envStatus.provider_cli_valid &&
+      (!workspacePath || envStatus.workspace_deps_valid) &&
+      (!workspacePath || envStatus.skills_valid) &&
+      baselineReady,
+  );
+
+  const handleCheckUpdates = async () => {
+    setUpdateError('');
+    setUpdateMessage('');
+    setAvailableUpdate(null);
+    setUpdatePhase('checking');
+    try {
+      const update = await checkForUpdate();
+      if (!update) {
+        setUpdatePhase('idle');
+        setUpdateMessage('No updates available.');
+        return;
+      }
+      setAvailableUpdate(update);
+      setUpdatePhase('available');
+      setUpdateMessage(`Update available: ${update.version}`);
+    } catch (e) {
+      setUpdatePhase('error');
+      setUpdateError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const handleDownloadAndInstallUpdate = async () => {
+    if (!availableUpdate) return;
+    setUpdateError('');
+    setUpdateMessage('');
+    setUpdatePhase('downloading');
+    try {
+      setUpdatePhase('installing');
+      await downloadAndInstall(availableUpdate);
+      setUpdatePhase('done');
+      setUpdateMessage('Update installed. Restart the app to finish.');
+    } catch (e) {
+      setUpdatePhase('error');
+      setUpdateError(e instanceof Error ? e.message : String(e));
     }
   };
 
@@ -157,6 +270,7 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
     setSttInstalling(true);
     setSttLogs([]);
     setSttProgress('');
+    setSttProgressPercent(null);
     try {
       const s = await invoke<SttStatus>('install_whispercpp', { model: sttModel });
       setStt(s);
@@ -165,6 +279,19 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
       alert('Voice-to-Text installation failed: ' + (e instanceof Error ? e.message : String(e)));
     } finally {
       setSttInstalling(false);
+    }
+  };
+
+  const handleApplyDebugForceDepReq = async () => {
+    try {
+      const v = debugForceDepReq.trim();
+      await IpcService.call<void>('SET_DEBUG_FORCE_DEPENDENCY_REQUEST', {
+        value: v.length ? v : null,
+      });
+      await checkAppState();
+      alert('Debug flag updated.');
+    } catch (e) {
+      alert(`Failed: ${e instanceof Error ? e.message : String(e)}`);
     }
   };
 
@@ -223,20 +350,72 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
     }
   };
 
-  const handleInstallDependencies = async () => {
-    setInstalling(true);
+  const handleOpenSetupWizard = async () => {
+    if (!workspacePath) {
+      alert('Open a project first so Epris knows which workspace to set up.');
+      return;
+    }
+    if (!onOpenSetupWizard) {
+      alert('Setup wizard is not available from this screen. Close Settings and use the Setup button in the status bar.');
+      return;
+    }
+    onClose();
+    onOpenSetupWizard();
+  };
+
+  const handleResetUserData = async () => {
+    if (
+      !confirm(
+        `This will clear Epris user data on this PC.\n\nIt will remove:\n- local toolchain (Node/pnpm/OpenCode/Gemini)\n- logs\n- cached workspace-template\n- state/config\n\n${
+          resetAlsoDeleteProjects
+            ? 'It will ALSO delete all known project folders recorded by Epris.\n\n'
+            : ''
+        }You will need to restart the app after this.\n\nContinue?`,
+      )
+    ) {
+      return;
+    }
+
+    setResetting(true);
     try {
-      await IpcService.call('INSTALL_MISSING_DEPENDENCIES');
-      await checkEnvironment();
-      alert('Installation complete!'); // Simplified feedback
+      const res = await IpcService.call<{
+        deleted: string[];
+        failed: { path: string; error: string }[];
+        projects_deleted: number;
+        restart_required: boolean;
+      }>('RESET_USER_DATA', { payload: { deleteProjects: resetAlsoDeleteProjects } });
+
+      const failed = res.failed?.length ? `\n\nFailed:\n${res.failed.map((f) => `- ${f.path}: ${f.error}`).join('\n')}` : '';
+      alert(
+        `Done.\n\nDeleted: ${res.deleted?.length ?? 0}\nProjects deleted: ${res.projects_deleted ?? 0}\nRestart required: ${
+          res.restart_required ? 'yes' : 'no'
+        }${failed}`,
+      );
     } catch (e) {
-      alert('Installation failed: ' + e);
+      alert('Reset failed: ' + (e instanceof Error ? e.message : String(e)));
     } finally {
-      setInstalling(false);
+      setResetting(false);
+    }
+  };
+
+  const geminiCliReady = Boolean(currentProvider === 'gemini' && envStatus?.provider_cli_valid);
+
+  const handleOpenAiStudio = async () => {
+    try {
+      await IpcService.call('OPEN_GEMINI_LOGIN');
+    } catch (e) {
+      console.error('Failed to open AI Studio:', e);
     }
   };
 
   const handleLogin = async () => {
+    if (!geminiCliReady) {
+      const ok = confirm('Gemini CLI is not installed yet. Open the Setup Wizard to install it now?');
+      if (ok) {
+        await handleOpenSetupWizard();
+      }
+      return;
+    }
     try {
       await invoke('open_gemini_auth_terminal');
       // Poll for auth status
@@ -279,6 +458,43 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
         </header>
 
         <div className="space-y-6">
+          {/* Updates */}
+          <div className="p-4 bg-slate-800/30 rounded-xl border border-slate-700 space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-medium text-slate-300">Updates</span>
+              <span className="text-[11px] text-slate-500">{appVersion ? `v${appVersion}` : 'v?'}</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => void handleCheckUpdates()}
+                className="px-3 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg text-xs font-bold text-slate-200 transition-colors flex items-center gap-2 disabled:opacity-50"
+                disabled={!canInteractWithUpdater}
+                title="Check for updates"
+              >
+                <RefreshCw size={14} className={updatePhase === 'checking' ? 'animate-spin' : ''} />
+                {updatePhase === 'checking' ? 'Checking…' : 'Check'}
+              </button>
+
+              <button
+                onClick={() => void handleDownloadAndInstallUpdate()}
+                className="px-3 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-xs font-bold text-white transition-colors flex items-center gap-2 disabled:opacity-50"
+                disabled={!availableUpdate || !canInteractWithUpdater}
+                title="Download and install update"
+              >
+                <Download size={14} />
+                {updatePhase === 'downloading' || updatePhase === 'installing' ? 'Installing…' : 'Install'}
+              </button>
+            </div>
+
+            {!!availableUpdate && (
+              <div className="text-[11px] text-slate-500">
+                Available: {availableUpdate.currentVersion} → {availableUpdate.version}
+              </div>
+            )}
+            {!!updateMessage && <div className="text-[11px] text-slate-300">{updateMessage}</div>}
+            {!!updateError && <div className="text-[11px] text-red-300">{updateError}</div>}
+          </div>
+
           {/* Projects Root */}
           <div className="p-4 bg-slate-800/30 rounded-xl border border-slate-700 space-y-3">
             <div className="flex items-center justify-between">
@@ -296,6 +512,64 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
             <div className="text-[11px] text-slate-500 break-all">{projectsRoot || '(not set)'}</div>
             <div className="text-[11px] text-slate-500">
               Changing this will move existing project folders to the new destination.
+            </div>
+          </div>
+
+          {/* Maintenance */}
+          <div className="p-4 bg-slate-800/30 rounded-xl border border-slate-700 space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-medium text-slate-300">Maintenance</span>
+              <span className="text-[11px] text-slate-500">Danger zone</span>
+            </div>
+
+            <label className="flex items-center gap-2 text-[11px] text-slate-400 select-none">
+              <input
+                type="checkbox"
+                className="accent-indigo-500"
+                checked={resetAlsoDeleteProjects}
+                onChange={(e) => setResetAlsoDeleteProjects(e.target.checked)}
+                disabled={resetting}
+              />
+              Also delete all projects (cannot be undone)
+            </label>
+
+            <button
+              onClick={() => void handleResetUserData()}
+              disabled={resetting}
+              className="w-full py-2 bg-red-600 hover:bg-red-500 text-white rounded-lg text-xs font-bold flex items-center justify-center gap-2 disabled:opacity-50 transition-all"
+              title="Clear local user data"
+            >
+              {resetting ? <RefreshCw size={14} className="animate-spin" /> : <AlertCircle size={14} />}
+              {resetting ? 'Clearing…' : 'Clear User Data'}
+            </button>
+
+            <div className="text-[11px] text-slate-500">
+              Clears local toolchain, logs, cache, and state. Restart required.
+            </div>
+          </div>
+
+          {/* Debug */}
+          <div className="p-4 bg-slate-800/30 rounded-xl border border-slate-700 space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-medium text-slate-300">Debug</span>
+              <span className="text-[11px] text-slate-500">Testing tools</span>
+            </div>
+            <div className="text-[11px] text-slate-500">
+              Force Gate to emit a dependency request (e.g. to test the install prompt UI). Leave empty to disable.
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                value={debugForceDepReq}
+                onChange={(e) => setDebugForceDepReq(e.target.value)}
+                placeholder="e.g. simplex-noise"
+                className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 font-mono"
+              />
+              <button
+                onClick={() => void handleApplyDebugForceDepReq()}
+                className="px-3 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg text-xs font-bold text-slate-200 transition-colors"
+              >
+                Apply
+              </button>
             </div>
           </div>
 
@@ -327,13 +601,13 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
               <span className="text-sm font-medium text-slate-300">Environment Status</span>
               {checkingEnv ? (
                 <RefreshCw size={14} className="animate-spin text-indigo-400" />
-              ) : envStatus?.missing?.length === 0 ? (
+              ) : isEnvReadyForUi ? (
                  <span className="flex items-center gap-1.5 text-xs font-bold text-emerald-400">
                     <CheckCircle2 size={14} /> Ready
                  </span>
               ) : (
                  <span className="flex items-center gap-1.5 text-xs font-bold text-amber-400">
-                    <AlertCircle size={14} /> Missing Dependencies
+                    <AlertCircle size={14} /> Not Ready
                  </span>
               )}
             </div>
@@ -368,18 +642,104 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
                        <span className="text-[10px] opacity-70 font-mono italic">{envStatus.details.provider_cli.version}</span>
                     )}
                  </div>
+                 <div
+                  className={`col-span-2 flex items-center justify-between px-3 py-2 rounded-lg border ${
+                    !workspacePath
+                      ? 'bg-slate-900/40 border-slate-700 text-slate-400'
+                      : envStatus.workspace_deps_valid
+                        ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-300'
+                        : 'bg-red-500/10 border-red-500/20 text-red-300'
+                  }`}
+                 >
+                  <div className="flex items-center gap-2">
+                    <div
+                      className={`w-2 h-2 rounded-full ${
+                        !workspacePath
+                          ? 'bg-slate-500'
+                          : envStatus.workspace_deps_valid
+                            ? 'bg-emerald-400'
+                            : 'bg-red-400'
+                      }`}
+                    />
+                    Workspace Dependencies
+                  </div>
+                  <span className="text-[10px] opacity-70 font-mono italic">
+                    {!workspacePath ? 'N/A (no project open)' : envStatus.workspace_deps_valid ? 'Ready' : 'Missing'}
+                  </span>
+                 </div>
+                 <div
+                  className={`col-span-2 flex items-center justify-between px-3 py-2 rounded-lg border ${
+                    !workspacePath
+                      ? 'bg-slate-900/40 border-slate-700 text-slate-400'
+                      : envStatus.skills_valid
+                        ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-300'
+                        : 'bg-red-500/10 border-red-500/20 text-red-300'
+                  }`}
+                 >
+                  <div className="flex items-center gap-2">
+                    <div
+                      className={`w-2 h-2 rounded-full ${
+                        !workspacePath
+                          ? 'bg-slate-500'
+                          : envStatus.skills_valid
+                            ? 'bg-emerald-400'
+                            : 'bg-red-400'
+                      }`}
+                    />
+                    Remotion Skills
+                  </div>
+                  <span className="text-[10px] opacity-70 font-mono italic">
+                    {!workspacePath ? 'N/A (no project open)' : envStatus.skills_valid ? 'Ready' : 'Missing'}
+                  </span>
+                 </div>
+                 <div
+                  className={`col-span-2 flex items-center justify-between px-3 py-2 rounded-lg border ${
+                    !workspacePath
+                      ? 'bg-slate-900/40 border-slate-700 text-slate-400'
+                      : baselineInfo &&
+                          baselineInfo.missing_in_workspace.length === 0 &&
+                          baselineInfo.missing_in_template.length === 0
+                        ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-300'
+                        : 'bg-red-500/10 border-red-500/20 text-red-300'
+                  }`}
+                 >
+                  <div className="flex items-center gap-2">
+                    <div
+                      className={`w-2 h-2 rounded-full ${
+                        !workspacePath
+                          ? 'bg-slate-500'
+                          : baselineInfo &&
+                              baselineInfo.missing_in_workspace.length === 0 &&
+                              baselineInfo.missing_in_template.length === 0
+                            ? 'bg-emerald-400'
+                            : 'bg-red-400'
+                      }`}
+                    />
+                    Effect Packages (Baseline)
+                  </div>
+                  <span className="text-[10px] opacity-70 font-mono italic">
+                    {!workspacePath
+                      ? 'N/A (no project open)'
+                      : baselineInfo
+                        ? baselineInfo.missing_in_workspace.length === 0 && baselineInfo.missing_in_template.length === 0
+                          ? 'Ready'
+                          : `Missing (${baselineInfo.missing_in_workspace.length + baselineInfo.missing_in_template.length})`
+                        : 'Checking...'}
+                  </span>
+                 </div>
               </div>
             )}
 
-            {envStatus && envStatus.missing.length > 0 && (
-               <button 
-                  onClick={handleInstallDependencies}
-                  disabled={installing}
-                  className="w-full py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold flex items-center justify-center gap-2 disabled:opacity-50 transition-all"
-               >
-                 {installing ? <RefreshCw size={14} className="animate-spin" /> : <Download size={14} />}
-                 {installing ? 'Installing to Toolchain...' : 'Install Missing Dependencies'}
-               </button>
+            {envStatus && !isEnvReadyForUi && (
+              <button
+                onClick={handleOpenSetupWizard}
+                disabled={!workspacePath}
+                className="w-full py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold flex items-center justify-center gap-2 disabled:opacity-50 transition-all"
+                title={!workspacePath ? 'Open a project first' : 'Open the setup wizard'}
+              >
+                <Download size={14} />
+                Open Setup Wizard
+              </button>
             )}
           </div>
 
@@ -476,7 +836,17 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
             )}
 
             {sttInstalling && sttProgress && (
-              <div className="text-[11px] text-slate-300 font-mono">{sttProgress}</div>
+              <div className="space-y-2">
+                {sttProgressPercent !== null && (
+                  <div className="h-2 bg-slate-800 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-indigo-500 transition-all duration-300 ease-out"
+                      style={{ width: `${Math.max(0, Math.min(100, sttProgressPercent))}%` }}
+                    />
+                  </div>
+                )}
+                <div className="text-[11px] text-slate-300 font-mono">{sttProgress}</div>
+              </div>
             )}
 
             {sttLogs.length > 0 && (
@@ -529,13 +899,14 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
                            Use your existing Google subscription. This requires authenticating via the system terminal.
                         </p>
                         
-                        <button 
-                           onClick={handleLogin}
-                           className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm font-bold flex items-center justify-center gap-2 transition-all shadow-lg shadow-indigo-900/20 active:scale-95"
-                        >
-                           <Terminal size={16} />
-                           Authenticate via Terminal
-                        </button>
+	                        <button 
+	                           onClick={handleLogin}
+	                           disabled={!geminiCliReady}
+	                           className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 disabled:hover:bg-indigo-600 text-white rounded-lg text-sm font-bold flex items-center justify-center gap-2 transition-all shadow-lg shadow-indigo-900/20 active:scale-95 disabled:opacity-60 disabled:cursor-not-allowed"
+	                        >
+	                           <Terminal size={16} />
+	                           Authenticate via Terminal
+	                        </button>
                         
                         <p className="text-[10px] text-slate-500 mt-3 text-center">
                            A new window will open. Follow the instructions to log in.
@@ -564,12 +935,12 @@ export function Settings({ onClose, currentProvider, onProviderChange }: Setting
                               Save
                             </button>
                         </div>
-                        <button 
-                           onClick={handleLogin}
-                           className="mt-3 text-[10px] text-slate-500 hover:text-slate-300 flex items-center gap-1 transition-colors"
-                        >
-                          Need a key? Get one from AI Studio <LogIn size={10} />
-                        </button>
+	                        <button 
+	                           onClick={handleOpenAiStudio}
+	                           className="mt-3 text-[10px] text-slate-500 hover:text-slate-300 flex items-center gap-1 transition-colors"
+	                        >
+	                          Need a key? Get one from AI Studio <LogIn size={10} />
+	                        </button>
                      </div>
                   </div>
                 </div>

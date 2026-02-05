@@ -220,10 +220,51 @@ pub fn restore_backup(workspace_path: &str, backup_name: &str) -> Result<(), Str
     options.overwrite = true;
     for entry in std::fs::read_dir(&backup_dir).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
-        fs_extra::dir::copy(entry.path(), workspace_path, &options).map_err(|e| e.to_string())?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|e| e.to_string())?;
+        if file_type.is_dir() {
+            fs_extra::dir::copy(&path, workspace_path, &options).map_err(|e| e.to_string())?;
+        } else if file_type.is_file() {
+            let file_name = entry.file_name();
+            let dst = Path::new(workspace_path).join(file_name);
+            std::fs::copy(&path, &dst).map_err(|e| e.to_string())?;
+        }
     }
 
     Ok(())
+}
+
+#[tauri::command]
+pub fn restore_pre_flight_backup(workspace_path: String) -> Result<(), String> {
+    restore_backup(&workspace_path, "pre_flight")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn restore_backup_handles_files_and_dirs() {
+        let tmp = tempdir().unwrap();
+        let ws = tmp.path();
+
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        std::fs::write(ws.join("src").join("main.tsx"), "A").unwrap();
+        std::fs::write(ws.join("index.html"), "<!-- A -->").unwrap();
+
+        create_backup(&ws.to_string_lossy(), "pre_flight").unwrap();
+
+        std::fs::write(ws.join("src").join("main.tsx"), "B").unwrap();
+        std::fs::write(ws.join("index.html"), "<!-- B -->").unwrap();
+
+        restore_backup(&ws.to_string_lossy(), "pre_flight").unwrap();
+
+        let src_text = std::fs::read_to_string(ws.join("src").join("main.tsx")).unwrap();
+        let html_text = std::fs::read_to_string(ws.join("index.html")).unwrap();
+        assert_eq!(src_text, "A");
+        assert_eq!(html_text, "<!-- A -->");
+    }
 }
 
 #[tauri::command]

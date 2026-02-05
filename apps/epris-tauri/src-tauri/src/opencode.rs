@@ -2,9 +2,11 @@ use serde::{Serialize, Deserialize};
 use std::path::Path;
 use std::io::Write;
 use std::process::Child;
+use std::process::Stdio;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use crate::utils;
+use crate::sandbox;
 use crate::snapshot;
 use crate::gate::{self, GateMode, GateResult};
 use tauri::{Manager, Emitter};
@@ -28,8 +30,41 @@ pub const OPENCODE_SYSTEM_PROMPT: &str = "You are an expert Remotion animation d
     3. Ensure the composition still renders successfully after changes (clean imports, valid JSX). \
     4. Use Remotion's animation APIs: useCurrentFrame, interpolate, spring, staticFile, etc. \
     5. Only operate on files inside the 'src' directory. DO NOT create standalone HTML files or files in the root. \
+    6. Do NOT install dependencies. Do NOT run pnpm/npm/yarn/bun commands. Do NOT change package.json or pnpm-lock.yaml. \
+       If you need a new npm package, write a short request in your response like: \
+       DEPENDENCY_REQUEST: <pkg1>, <pkg2> (1-line reason). Then stop. \
+    7. If the user explicitly requests using a specific npm package (e.g. \"use simplex-noise\"), you MUST use that package via import. \
+       Do NOT re-implement or substitute a different library to avoid the dependency. If it's missing, output DEPENDENCY_REQUEST and stop. \
     \
     The current working directory is the workspace root.";
+
+fn describe_installed_packages(workspace_path: &str) -> String {
+    let pkg_path = std::path::Path::new(workspace_path).join("package.json");
+    let bytes = match std::fs::read(&pkg_path) {
+        Ok(b) => b,
+        Err(_) => return "package.json not found".to_string(),
+    };
+    let v: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(_) => return "package.json unreadable".to_string(),
+    };
+
+    let mut deps: Vec<String> = Vec::new();
+    let mut dev: Vec<String> = Vec::new();
+    if let Some(obj) = v.get("dependencies").and_then(|x| x.as_object()) {
+        deps.extend(obj.keys().cloned());
+    }
+    if let Some(obj) = v.get("devDependencies").and_then(|x| x.as_object()) {
+        dev.extend(obj.keys().cloned());
+    }
+    deps.sort();
+    dev.sort();
+    format!(
+        "dependencies: [{}]\n devDependencies: [{}]\n(If you need a new package, do NOT install; request it.)",
+        deps.join(", "),
+        dev.join(", ")
+    )
+}
 
 pub struct OpenCodeState {
     pub process: Option<Child>,
@@ -70,6 +105,7 @@ pub fn cancel_current_run(
 
 #[tauri::command]
 pub fn start_opencode(
+    app_handle: tauri::AppHandle,
     state: tauri::State<'_, Mutex<OpenCodeState>>,
     workspace_path: String,
 ) -> Result<u16, String> {
@@ -80,10 +116,53 @@ pub fn start_opencode(
     }
     
     let port = utils::find_available_port(4096);
-    let child = utils::create_shell_command("opencode", &["serve", "--hostname", "127.0.0.1", "--port", &port.to_string()])
-        .current_dir(&workspace_path)
+
+    let logs_dir = Path::new(&workspace_path).join("logs");
+    let _ = std::fs::create_dir_all(&logs_dir);
+    let log_path = logs_dir.join("opencode.log");
+    let mut log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|e| format!("Failed to open opencode.log: {}", e))?;
+    let _ = writeln!(log_file, "\n--- OpenCode Server Log [{}] ---", chrono::Utc::now());
+
+    let mut cmd = utils::create_shell_command(
+        "opencode",
+        &["serve", "--hostname", "127.0.0.1", "--port", &port.to_string()],
+    );
+    cmd.current_dir(&workspace_path);
+
+    // Ensure the server can find our local toolchain/bin (opencode may not be on system PATH).
+    let app_dir = app_handle
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+    let toolchain_bin = app_dir.join("toolchain").join("bin");
+    let path_sep = if cfg!(target_os = "windows") { ";" } else { ":" };
+    let current_path = std::env::var("PATH").unwrap_or_default();
+    let new_path = format!("{}{}{}", toolchain_bin.to_string_lossy(), path_sep, current_path);
+    cmd.env("PATH", new_path);
+
+    // Reduce unreadable ANSI escape sequences in opencode.log.
+    cmd.env("NO_COLOR", "1");
+    cmd.env("FORCE_COLOR", "0");
+    cmd.env("TERM", "dumb");
+
+    cmd.stdout(Stdio::from(log_file.try_clone().map_err(|e| e.to_string())?));
+    cmd.stderr(Stdio::from(log_file));
+
+    let mut child = cmd
         .spawn()
         .map_err(|e| format!("Failed to start OpenCode: {}", e))?;
+
+    // If the child exits immediately, surface a helpful error.
+    if let Ok(Some(status)) = child.try_wait() {
+        return Err(format!(
+            "OpenCode server exited immediately (code: {:?}). Check workspace/logs/opencode.log",
+            status.code()
+        ));
+    }
     
     oc.process = Some(child);
     oc.port = port;
@@ -123,6 +202,7 @@ pub async fn send_prompt(
         let _ = app_handle.emit("prompt-progress", PromptProgress { percent: 10.0, step: "Creating pre-flight backup".into() });
         println!("[Epris] Step 1/5: Creating pre-flight backup (Gemini)...");
         snapshot::create_backup(&workspace_path, "pre_flight")?;
+        let ai_started_at = std::time::SystemTime::now();
 
         // Step 2: Run CLI
         let _ = app_handle.emit("prompt-progress", PromptProgress { percent: 20.0, step: "AI Generating Animation Code".into() });
@@ -182,6 +262,36 @@ pub async fn send_prompt(
              return Ok(PromptResponse {
                 success: false,
                 message: format!("🔒 Security violation: Files protected. Reverted."),
+                gate_result: None,
+                snapshot_id: None,
+                canceled: false,
+                validation_skipped: false,
+            });
+        }
+
+        // Directory & boundary audit (best-effort): forbid node_modules/.git writes, and any writes outside allowed dirs.
+        let audit = sandbox::audit_workspace_after_ai_run(Path::new(&workspace_path), ai_started_at)?;
+        if audit.incomplete {
+            let _ = log_security_audit_note(
+                &workspace_path,
+                &prompt,
+                "Workspace audit was best-effort (timed out scanning large directories).",
+            );
+        }
+        if !audit.violations.is_empty() {
+            let _ = log_security_violation(
+                &workspace_path,
+                &audit.violations,
+                &prompt,
+                std::collections::HashMap::new(),
+            );
+            snapshot::restore_backup(&workspace_path, "pre_flight")?;
+            return Ok(PromptResponse {
+                success: false,
+                message: format!(
+                    "🔒 Security violation: AI wrote to forbidden paths: {}. Changes reverted.",
+                    audit.violations.join(", ")
+                ),
                 gate_result: None,
                 snapshot_id: None,
                 canceled: false,
@@ -293,6 +403,7 @@ pub async fn send_prompt(
     println!("[Epris] Step 1/5: Creating pre-flight backup...");
     let _ = app_handle.emit("prompt-progress", PromptProgress { percent: 10.0, step: "Creating pre-flight backup".into() });
     snapshot::create_backup(&workspace_path, "pre_flight")?;
+    let ai_started_at = std::time::SystemTime::now();
     
     println!("[Epris] Step 2/5: Sending prompt to AI: \"{}\"", prompt);
     let _ = app_handle.emit("prompt-progress", PromptProgress { percent: 20.0, step: "AI Generating Animation Code".into() });
@@ -302,8 +413,9 @@ pub async fn send_prompt(
 
     let prompt_start = std::time::Instant::now();
     let system_prompt = format!(
-        "{} The Remotion workspace is located at: {}. You MUST read src/Composition.tsx and src/Root.tsx.",
+        "{}\n\nInstalled npm packages:\n{}\n\nThe Remotion workspace is located at: {}. You MUST read src/Composition.tsx and src/Root.tsx.",
         remotion_rules,
+        describe_installed_packages(&workspace_path),
         workspace_path
     );
 
@@ -381,6 +493,36 @@ pub async fn send_prompt(
         return Ok(PromptResponse {
             success: false,
             message: format!("🔒 Security violation: AI attempted to modify protected files: {}. Changes reverted.", forbidden_files.join(", ")),
+            gate_result: None,
+            snapshot_id: None,
+            canceled: false,
+            validation_skipped: false,
+        });
+    }
+
+    let audit = sandbox::audit_workspace_after_ai_run(Path::new(&workspace_path), ai_started_at)?;
+    if audit.incomplete {
+        let _ = log_security_audit_note(
+            &workspace_path,
+            &prompt,
+            "Workspace audit was best-effort (timed out scanning large directories).",
+        );
+    }
+    if !audit.violations.is_empty() {
+        let _ = log_security_violation(
+            &workspace_path,
+            &audit.violations,
+            &prompt,
+            std::collections::HashMap::new(),
+        );
+        println!("[Epris] Restoring from pre-flight backup...");
+        snapshot::restore_backup(&workspace_path, "pre_flight")?;
+        return Ok(PromptResponse {
+            success: false,
+            message: format!(
+                "🔒 Security violation: AI wrote to forbidden paths: {}. Changes reverted.",
+                audit.violations.join(", ")
+            ),
             gate_result: None,
             snapshot_id: None,
             canceled: false,
@@ -664,6 +806,26 @@ pub fn log_security_violation(
             log_entry.push_str(&format!("\nFile: {}\n{}\n", file, diff));
         }
     }
+
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .and_then(|mut file| file.write_all(log_entry.as_bytes()))
+        .map_err(|e| e.to_string())
+}
+
+fn log_security_audit_note(workspace_path: &str, prompt: &str, note: &str) -> Result<(), String> {
+    let log_dir = Path::new(workspace_path).join("logs");
+    std::fs::create_dir_all(&log_dir).map_err(|e| e.to_string())?;
+
+    let log_path = log_dir.join("security.log");
+    let log_entry = format!(
+        "[{}] 🔎 AUDIT NOTE\nPrompt: {}\n{}\n",
+        chrono::Utc::now().to_rfc3339(),
+        prompt,
+        note
+    );
 
     std::fs::OpenOptions::new()
         .create(true)

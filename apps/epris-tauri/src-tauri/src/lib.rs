@@ -9,6 +9,10 @@ mod video_config;
 mod utils;
 mod assets;
 mod stt;
+mod sandbox;
+mod toolchain;
+mod maintenance;
+mod install_log;
 
 use std::sync::Mutex;
 use tauri::Manager;
@@ -25,6 +29,64 @@ pub mod provider;
 use crate::state_manager::{StateManager, AppStateStore};
 use crate::environment::{EnvironmentManager, EnvironmentStatus};
 // Duplicate Manager import removed
+
+fn maybe_migrate_legacy_app_data_dir(app_handle: &tauri::AppHandle) {
+    let Ok(current_dir) = app_handle.path().app_local_data_dir() else {
+        return;
+    };
+    let current_state = current_dir.join("state.json");
+    if current_state.exists() {
+        return;
+    }
+
+    let Some(parent) = current_dir.parent() else {
+        return;
+    };
+
+    // Best-effort migration for app renames (e.g. productName changes).
+    // If the new app data dir is empty/missing but an old one exists, copy/move it forward.
+    let legacy_candidates = ["epris-tauri", "Epris", "epris"];
+    for legacy_name in legacy_candidates {
+        if let Some(n) = current_dir.file_name() {
+            if n == legacy_name {
+                continue;
+            }
+        }
+
+        let legacy_dir = parent.join(legacy_name);
+        let legacy_state = legacy_dir.join("state.json");
+        if !legacy_state.exists() {
+            continue;
+        }
+
+        if !current_dir.exists() {
+            if std::fs::rename(&legacy_dir, &current_dir).is_ok() {
+                println!(
+                    "[Epris] Migrated app data dir (rename): {} -> {}",
+                    legacy_dir.to_string_lossy(),
+                    current_dir.to_string_lossy()
+                );
+                return;
+            }
+        }
+
+        // Fallback: copy inside, keep legacy dir in place (safer).
+        let _ = std::fs::create_dir_all(&current_dir);
+        let mut options = fs_extra::dir::CopyOptions::new();
+        options.copy_inside = true;
+        options.overwrite = false;
+        let _ = fs_extra::dir::copy(&legacy_dir, &current_dir, &options);
+
+        if current_dir.join("state.json").exists() {
+            println!(
+                "[Epris] Migrated app data dir (copy): {} -> {}",
+                legacy_dir.to_string_lossy(),
+                current_dir.to_string_lossy()
+            );
+            return;
+        }
+    }
+}
 
 fn auto_save_active_project_checkpoint(app_handle: &tauri::AppHandle, reason: &str) {
     let app_dir = match app_handle.path().app_local_data_dir() {
@@ -56,6 +118,29 @@ fn auto_save_active_project_checkpoint(app_handle: &tauri::AppHandle, reason: &s
 #[tauri::command]
 fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
+}
+
+#[tauri::command]
+fn append_updater_log(app_handle: tauri::AppHandle, line: String) -> Result<(), String> {
+    let app_dir = app_handle
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+    let logs_dir = app_dir.join("logs");
+    std::fs::create_dir_all(&logs_dir).map_err(|e| e.to_string())?;
+
+    let path = logs_dir.join("updater.log");
+    let now = chrono::Utc::now().to_rfc3339();
+    let entry = format!("[{}] {}\n", now, line.trim_end());
+
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| e.to_string())?;
+    f.write_all(entry.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 // Preview server logic moved to preview.rs
@@ -148,12 +233,19 @@ fn get_app_state(app_handle: tauri::AppHandle) -> Result<AppStateStore, String> 
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let app = tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
+    let mut builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
+
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    }
+
+    let app = builder
         .manage(Mutex::new(preview::PreviewServerState::default()))
         .manage(Mutex::new(opencode::OpenCodeState::default()))
         .manage(Mutex::new(export::ExportState::default()))
         .setup(|app| {
+            maybe_migrate_legacy_app_data_dir(&app.handle());
             // Signal Handler for Ctrl+C (Terminal Exit)
             let handle = app.handle().clone();
             ctrlc::set_handler(move || {
@@ -203,15 +295,25 @@ pub fn run() {
             snapshot::check_unsaved_changes,
             snapshot::clear_snapshot_history,
             snapshot::save_snapshot_layout,
+            snapshot::restore_pre_flight_backup,
             // Environment & Gemini
             get_environment_status,
             get_app_state,
+            append_updater_log,
             environment::install_missing_dependencies,
+            environment::install_js_packages,
+            environment::link_workspace_dependencies,
+            environment::get_baseline_packages_info,
+            environment::install_baseline_packages,
+            environment::cancel_env_install,
             environment::get_gemini_auth_status,
             environment::open_gemini_login,
             environment::set_gemini_api_key,
             environment::open_gemini_auth_terminal,
             provider::stop_provider_cli,
+            maintenance::reset_user_data,
+            maintenance::set_debug_force_dependency_request,
+            maintenance::set_baseline_packages_ack,
             assets::list_assets,
             assets::upload_asset,
             assets::delete_asset,

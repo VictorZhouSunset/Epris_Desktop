@@ -7,18 +7,24 @@ Aim: To create a desktop application that can generate code videos using AI and 
 
 ## 2. Project Plan
 
-The full plan is in: docs\Epris_Desktop_Version_Plans.md, however, a lot of the plans need to be updated and restructured so don't take them as a final plan. However, the V0 plan I have almost finished and the current implementation is an extension of the plan.
+The full plan is in: docs\Epris_Desktop_Version_Plans.md, however, a lot of the plans need to be updated and restructured so don't take them as a final plan.
 
-The previous implementation plan of this project (which is the V0 stage) is: docs\Epris_v0_development_plan.md
-and: docs\step_11_gemini_cli_open_code_provider_first_run_wizard_remotion_skills_spec.md
-You should read these documents carefully and research into the project's current state before starting to work on it. If you find any discrepancies or errors, please **notify me first** before proceeding.
+The previous implementation plan of this project (which is the V0 stage) is:
+
+- docs\Archived\Epris_v0_development_plan.md
+- docs\Archived\step_11_gemini_cli_open_code_provider_first_run_wizard_remotion_skills_spec.md
+- docs\Archived\step_12_13_14.md
+  You should read these documents carefully and research into the project's current state before starting to work on it. If you find any discrepancies or errors, please **notify me first** before proceeding.
 
 I have put the two main references for step 11 in your skills: gemini-cli and opencode-server, these two give you a basic idea of how to integrate these two CLI into Epris.
+
+The web_apps/ folder contains a former webApp whose UI realization can be of reference to the UI here. Don't modify anything under this, just reference and should be git ignored.
 
 # Modern Full-Stack Development Guidelines
 
 **Key Notice**: You are working in a WSL sandbox, so some "pnpm" operation will be in conflict with my "pnpm" in Windows, such as pnpm i, pnpm reinstall, node-gyp, etc. Try not to do these by yourself, ask me to do it on Windows side.
 I write a script in scripts folder (bootstrap-wsl.sh), running it should give you ability to run cargo tests.
+You **should not** fix a problem by patches or circulate the problem, you need to first discuss with me, and study the codebase thorough so that we agree on the problem, then you can come up with a solid solution.
 
 You **can** deviate from the requirements below (especially when you are explicitly asked to use the framework other than those listed below), but if you do so, you **must** provide detailed explanation and **seek approval or confirmation before** you execute on these.
 
@@ -26,7 +32,7 @@ You **can** deviate from the requirements below (especially when you are explici
 
 - **Python:** **Exclusively use `uv`** for all package management and virtual environment tasks. Manage dependencies **solely** via `pyproject.toml` (Project Mode).
 - **JavaScript:** **Exclusively use `pnpm`** for dependency management.
-- **Project Structure:** Default to a Monorepo structure, maintaining strict separation between `/backend` (FastAPI) and `/web` (Next.js).
+- **Project Structure:** For a webapp project, default to a Monorepo structure, maintaining strict separation between `/backend` (FastAPI) and `/web` (Next.js). If the project is other form, there is not yet any standard yet.
 
 ## 2. Backend Standard (Python)
 

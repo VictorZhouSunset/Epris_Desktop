@@ -3,6 +3,7 @@ use std::sync::Mutex;
 use crate::utils;
 use std::io::Write;
 use std::process::Stdio;
+use tauri::Manager;
 
 pub struct PreviewServerState {
     pub process: Option<Child>,
@@ -17,6 +18,7 @@ impl Default for PreviewServerState {
 
 #[tauri::command]
 pub fn start_preview_server(
+    app_handle: tauri::AppHandle,
     state: tauri::State<'_, Mutex<PreviewServerState>>,
     workspace_path: String,
 ) -> Result<u16, String> {
@@ -52,6 +54,22 @@ pub fn start_preview_server(
     // Note: `pnpm run <script> --port <n>` forwards args to the script. (`--` is NOT stripped by pnpm.)
     let mut cmd = utils::create_shell_command("pnpm", &["run", "dev", "--port", &port.to_string()]);
     cmd.current_dir(&workspace_path);
+
+    // Ensure the preview server can find our local pnpm (some machines won't have pnpm on PATH).
+    let app_dir = app_handle
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+    let toolchain_bin = app_dir.join("toolchain").join("bin");
+    let path_sep = if cfg!(target_os = "windows") { ";" } else { ":" };
+    let current_path = std::env::var("PATH").unwrap_or_default();
+    let new_path = format!("{}{}{}", toolchain_bin.to_string_lossy(), path_sep, current_path);
+    cmd.env("PATH", new_path);
+    // Reduce unreadable ANSI escape sequences in preview.log.
+    cmd.env("NO_COLOR", "1");
+    cmd.env("FORCE_COLOR", "0");
+    cmd.env("TERM", "dumb");
+
     cmd.stdout(Stdio::from(log_file.try_clone().map_err(|e| e.to_string())?));
     cmd.stderr(Stdio::from(log_file));
 

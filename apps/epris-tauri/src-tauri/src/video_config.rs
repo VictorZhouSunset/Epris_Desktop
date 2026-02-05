@@ -63,11 +63,19 @@ fn replace_export_const_u32(lines: &mut [String], name: &str, value: u32) -> boo
 
 fn migrate_legacy_video_config(workspace_path: &str) -> Result<(), String> {
     let ws = Path::new(workspace_path);
+    if !ws.exists() {
+        return Err(format!("Workspace directory not found: {}", workspace_path));
+    }
     let src_dir = ws.join("src");
     let vc_path = src_dir.join("VideoConfig.ts");
 
     if vc_path.exists() {
         return Ok(());
+    }
+
+    if !src_dir.exists() {
+        std::fs::create_dir_all(&src_dir)
+            .map_err(|e| format!("Failed to create workspace src dir: {}", e))?;
     }
 
     let root_path = src_dir.join("Root.tsx");
@@ -190,6 +198,24 @@ export default Preview;\n";
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn migrate_creates_src_dir_and_video_config_when_missing() {
+        let tmp = tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+
+        migrate_legacy_video_config(ws.to_string_lossy().as_ref()).unwrap();
+
+        assert!(ws.join("src").exists());
+        assert!(ws.join("src").join("VideoConfig.ts").exists());
+    }
 }
 
 fn ensure_video_config_wired(workspace_path: &str) -> Result<(), String> {

@@ -1,7 +1,7 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { RefreshCw, Check, AlertTriangle, Loader2, Download } from 'lucide-react';
+import { RefreshCw, Check, AlertTriangle, Loader2, Download, X } from 'lucide-react';
 import type { SttStatus } from '../types/backend';
 
 interface EnvironmentStatus {
@@ -22,20 +22,35 @@ interface FirstRunWizardProps {
   workspacePath?: string;
   provider: string; // 'opencode' | 'gemini'
   onComplete: () => void;
+  onClose?: () => void;
 }
 
-export function FirstRunWizard({ workspacePath, provider, onComplete }: FirstRunWizardProps) {
+interface BaselinePackagesInfo {
+  signature: string;
+  missing_in_workspace: string[];
+  missing_in_template: string[];
+}
+
+export function FirstRunWizard({ workspacePath, provider, onComplete, onClose }: FirstRunWizardProps) {
   const [status, setStatus] = useState<EnvironmentStatus | null>(null);
+  const [baseline, setBaseline] = useState<BaselinePackagesInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [installing, setInstalling] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
+  const [liveInstallLine, setLiveInstallLine] = useState<string>('');
   const [progress, setProgress] = useState<{ step: string; percent: number } | null>(null);
   const [stt, setStt] = useState<SttStatus | null>(null);
   const [sttInstalling, setSttInstalling] = useState(false);
   const [sttLogs, setSttLogs] = useState<string[]>([]);
   const [sttProgress, setSttProgress] = useState<string>('');
+  const [sttProgressPercent, setSttProgressPercent] = useState<number | null>(null);
   const [sttModel, setSttModel] = useState<'tiny' | 'tiny.en' | 'small'>('tiny.en');
+
+  const onCompleteRef = useRef(onComplete);
+  useEffect(() => {
+    onCompleteRef.current = onComplete;
+  }, [onComplete]);
 
   const checkEnv = useCallback(async () => {
     if (!workspacePath) return;
@@ -46,6 +61,13 @@ export function FirstRunWizard({ workspacePath, provider, onComplete }: FirstRun
         workspacePath 
       });
       setStatus(env);
+
+      try {
+        const info = await invoke<BaselinePackagesInfo>('get_baseline_packages_info', { workspacePath });
+        setBaseline(info);
+      } catch {
+        setBaseline(null);
+      }
       
       // Auto-complete if everything is ready
       if (
@@ -55,14 +77,14 @@ export function FirstRunWizard({ workspacePath, provider, onComplete }: FirstRun
         env.workspace_deps_valid && 
         env.skills_valid
       ) {
-        onComplete();
+        onCompleteRef.current();
       }
     } catch (err) {
       setError(String(err));
     } finally {
       setLoading(false);
     }
-  }, [workspacePath, provider, onComplete]);
+  }, [workspacePath, provider]);
 
   const checkStt = useCallback(async () => {
     try {
@@ -78,9 +100,11 @@ export function FirstRunWizard({ workspacePath, provider, onComplete }: FirstRun
   }, []);
 
   useEffect(() => {
+    // Avoid re-checking while an install is running (prevents flicker/unmount issues).
+    if (installing) return;
     checkEnv();
     void checkStt();
-  }, [checkEnv, checkStt]);
+  }, [checkEnv, checkStt, installing]);
 
   useEffect(() => {
     // Listen for install progress
@@ -88,7 +112,14 @@ export function FirstRunWizard({ workspacePath, provider, onComplete }: FirstRun
       setProgress(e.payload);
     });
     const unlistenLogs = listen<string>('env_install_log', (e) => {
-      setLogs(prev => [...prev.slice(-99), e.payload]);
+      const line = String(e.payload || '');
+      // Avoid spamming the log window with heartbeat lines (keep it as a “live” status line).
+      if (line.startsWith('pnpm install still running (') || line.startsWith('pnpm add still running (')) {
+        setLiveInstallLine(line);
+        return;
+      }
+      setLiveInstallLine('');
+      setLogs(prev => [...prev.slice(-99), line]);
     });
     const unlistenSttLogs = listen<string>('stt_install_log', (e) => {
       setSttLogs(prev => [...prev.slice(-99), e.payload]);
@@ -103,8 +134,10 @@ export function FirstRunWizard({ workspacePath, provider, onComplete }: FirstRun
 
       if (total && percent !== null && total > 0) {
         setSttProgress(`${label}: ${mb(downloaded)} / ${mb(total)} MB (${Math.round(percent)}%)`);
+        setSttProgressPercent(percent);
       } else {
         setSttProgress(`${label}: ${mb(downloaded)} MB`);
+        setSttProgressPercent(null);
       }
     });
 
@@ -116,10 +149,11 @@ export function FirstRunWizard({ workspacePath, provider, onComplete }: FirstRun
     };
   }, []);
 
-  const handleInstall = async () => {
+  const handleInstall = useCallback(async () => {
     if (!workspacePath) return;
     setInstalling(true);
     setLogs([]);
+    setLiveInstallLine('');
     setError(null);
     try {
       await invoke('install_missing_dependencies', { 
@@ -133,12 +167,40 @@ export function FirstRunWizard({ workspacePath, provider, onComplete }: FirstRun
       setInstalling(false);
       setProgress(null);
     }
-  };
+  }, [workspacePath, provider, checkEnv]);
+
+  const handleInstallEffectPackages = useCallback(async () => {
+    if (!workspacePath) return;
+    setInstalling(true);
+    setLogs([]);
+    setLiveInstallLine('');
+    setError(null);
+    try {
+      await invoke('install_baseline_packages', { workspacePath });
+      await checkEnv();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setInstalling(false);
+      setProgress(null);
+    }
+  }, [workspacePath, checkEnv]);
+
+  const handleCancelInstall = useCallback(async () => {
+    try {
+      await invoke('cancel_env_install');
+    } catch {}
+    setInstalling(false);
+    setProgress(null);
+    setLiveInstallLine('');
+    setError('Canceled.');
+  }, []);
 
   const handleInstallStt = async () => {
     setSttInstalling(true);
     setSttLogs([]);
     setSttProgress('');
+    setSttProgressPercent(null);
     try {
       await invoke('install_whispercpp', { model: sttModel });
       await checkStt();
@@ -149,23 +211,14 @@ export function FirstRunWizard({ workspacePath, provider, onComplete }: FirstRun
     }
   };
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center p-12 bg-slate-900 text-slate-400">
-        <Loader2 className="animate-spin mr-2" />
-        Checking environment...
-      </div>
-    );
-  }
-
-  if (!status) return null;
-
-  const isComplete = 
-    status.node_valid && 
-    status.pnpm_valid && 
-    status.provider_cli_valid && 
-    status.workspace_deps_valid && 
-    status.skills_valid;
+  const isComplete = Boolean(
+    status &&
+      status.node_valid &&
+      status.pnpm_valid &&
+      status.provider_cli_valid &&
+      status.workspace_deps_valid &&
+      status.skills_valid,
+  );
 
   if (isComplete) return null;
 
@@ -173,7 +226,8 @@ export function FirstRunWizard({ workspacePath, provider, onComplete }: FirstRun
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/90 backdrop-blur-sm p-4">
       <div className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
         {/* Header */}
-        <div className="p-6 border-b border-slate-800 bg-slate-900">
+        <div className="p-6 border-b border-slate-800 bg-slate-900 flex items-start justify-between gap-4">
+          <div>
           <h2 className="text-xl font-bold text-white flex items-center gap-2">
             <Download className="text-indigo-400" />
             Environment Setup
@@ -181,18 +235,73 @@ export function FirstRunWizard({ workspacePath, provider, onComplete }: FirstRun
           <p className="text-slate-400 text-sm mt-1">
             We need to install some local dependencies for {provider} and Remotion.
           </p>
+          </div>
+          {onClose && (
+            <button
+              onClick={async () => {
+                if (!installing) {
+                  onClose();
+                  return;
+                }
+
+                const ok = confirm(
+                  "Installation is still running.\n\nCancel the installation and close this window?\n\n(You can restart setup later from the main screen.)",
+                );
+                if (!ok) return;
+
+                await handleCancelInstall();
+                onClose();
+              }}
+              className="p-2 rounded-xl hover:bg-slate-800/60 text-slate-400 hover:text-slate-200 transition-colors"
+              title="Close"
+            >
+              <X size={18} />
+            </button>
+          )}
         </div>
 
         {/* Status List */}
         <div className="p-6 flex-1 overflow-y-auto">
+          {loading && (
+            <div className="flex items-center gap-2 text-slate-400 text-sm mb-4">
+              <Loader2 className="animate-spin" />
+              Checking environment...
+            </div>
+          )}
+
+          {!status && !loading && (
+            <div className="text-slate-400 text-sm">
+              No environment status available.
+            </div>
+          )}
+
+          {status && (
           <div className="space-y-4">
             <StatusItem label="Node.js Check" passed={status.node_valid} detail={status.details.node?.version} />
             <StatusItem label="pnpm Check" passed={status.pnpm_valid} detail={status.details.pnpm?.version} />
             <StatusItem label={`${provider} CLI`} passed={status.provider_cli_valid} detail={status.details.provider_cli?.version} />
             <StatusItem label="Workspace Dependencies" passed={status.workspace_deps_valid} />
+            <StatusItem
+              label="Effect Packages"
+              passed={Boolean(
+                baseline &&
+                  baseline.missing_in_workspace.length === 0 &&
+                  baseline.missing_in_template.length === 0,
+              )}
+              detail={
+                baseline
+                  ? baseline.missing_in_workspace.length === 0 && baseline.missing_in_template.length === 0
+                    ? 'Ready'
+                    : `Workspace ${baseline.missing_in_workspace.length} missing, Template ${baseline.missing_in_template.length} missing`
+                  : loading
+                    ? 'Checking...'
+                    : 'Unknown'
+              }
+            />
             <StatusItem label="Remotion Skills" passed={status.skills_valid} />
             <StatusItem label="Voice-to-Text (whisper.cpp) (Optional)" passed={Boolean(stt?.installed)} detail={stt?.model} />
           </div>
+          )}
 
           {error && (
             <div className="mt-6 p-4 bg-red-500/10 border border-red-500/20 rounded-lg text-red-400 text-sm">
@@ -217,6 +326,12 @@ export function FirstRunWizard({ workspacePath, provider, onComplete }: FirstRun
                   </div>
                 </div>
               )}
+
+              {liveInstallLine && (
+                <div className="text-xs text-slate-400 font-mono bg-slate-950/40 border border-slate-800 rounded-lg px-3 py-2">
+                  {liveInstallLine}
+                </div>
+              )}
               
               <div className="bg-slate-950 rounded-lg p-3 font-mono text-xs text-slate-400 h-32 overflow-y-auto border border-slate-800">
                 {logs.length === 0 ? (
@@ -226,6 +341,42 @@ export function FirstRunWizard({ workspacePath, provider, onComplete }: FirstRun
                     <div key={i} className="whitespace-pre-wrap font-mono">{line}</div>
                   ))
                 )}
+              </div>
+
+              <div className="flex items-center justify-end gap-3">
+                <button
+                  onClick={handleCancelInstall}
+                  className="px-4 py-2 rounded-xl bg-slate-900/50 border border-slate-700 text-slate-200 font-bold hover:bg-slate-900 transition-colors"
+                  title="Stop installation"
+                >
+                  Cancel install
+                </button>
+              </div>
+            </div>
+          )}
+
+          {!installing &&
+            baseline &&
+            (baseline.missing_in_workspace.length > 0 || baseline.missing_in_template.length > 0) && (
+            <div className="mt-6 p-4 bg-slate-950/40 border border-slate-800 rounded-xl">
+              <div className="text-slate-200 font-bold">Effect packages (baseline)</div>
+              <div className="text-xs text-slate-500 mt-1">
+                Install the baseline effect packages used by most templates (workspace + template).
+              </div>
+              <div className="mt-3 max-h-32 overflow-y-auto rounded-lg bg-slate-950 border border-slate-800 p-3 text-xs text-slate-200 font-mono">
+                {[
+                  ...(baseline.missing_in_workspace || []).map((p) => `workspace: ${p}`),
+                  ...(baseline.missing_in_template || []).map((p) => `template: ${p}`),
+                ].join('\n')}
+              </div>
+              <div className="mt-4 flex items-center justify-end gap-3">
+                <button
+                  onClick={handleInstallEffectPackages}
+                  className="px-4 py-2 rounded-xl bg-indigo-600 text-white font-black hover:bg-indigo-500 transition-colors"
+                  title="Install baseline effect packages"
+                >
+                  Install effect packages
+                </button>
               </div>
             </div>
           )}
@@ -271,7 +422,17 @@ export function FirstRunWizard({ workspacePath, provider, onComplete }: FirstRun
               </div>
 	            </div>
 	            {sttInstalling && sttProgress && (
-	              <div className="mt-3 text-xs text-slate-300 font-mono">{sttProgress}</div>
+	              <div className="mt-3 space-y-2">
+                  {sttProgressPercent !== null && (
+                    <div className="h-2 bg-slate-800 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-indigo-500 transition-all duration-300 ease-out"
+                        style={{ width: `${Math.max(0, Math.min(100, sttProgressPercent))}%` }}
+                      />
+                    </div>
+                  )}
+                  <div className="text-xs text-slate-300 font-mono">{sttProgress}</div>
+                </div>
 	            )}
 	            {sttLogs.length > 0 && (
 	              <div className="mt-4 bg-slate-950 rounded-lg p-3 font-mono text-xs text-slate-400 max-h-28 overflow-y-auto border border-slate-800">

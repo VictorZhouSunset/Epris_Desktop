@@ -8,6 +8,128 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tauri::Manager;
 
+#[cfg(any(test, not(debug_assertions)))]
+use include_dir::{include_dir, Dir};
+#[cfg(any(test, not(debug_assertions)))]
+use include_dir::DirEntry;
+
+#[cfg(any(test, not(debug_assertions)))]
+static WORKSPACE_TEMPLATE_EMBEDDED: Dir<'static> =
+    include_dir!("$CARGO_MANIFEST_DIR/../../../workspace-template");
+
+#[cfg(any(test, not(debug_assertions)))]
+fn extract_embedded_template_to(dst_root: &Path, version: &str) -> Result<(), String> {
+    // Extract into a temp directory first, then swap it into place. This prevents partially
+    // extracted templates (e.g. if the app is terminated during an update/install).
+    let parent = dst_root
+        .parent()
+        .ok_or_else(|| "Template destination has no parent directory".to_string())?;
+    let tmp_dir = parent.join(format!(
+        ".workspace-template.tmp-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let backup_dir = parent.join(format!(
+        ".workspace-template.old-{}",
+        uuid::Uuid::new_v4()
+    ));
+
+    if tmp_dir.exists() {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+    if backup_dir.exists() {
+        let _ = std::fs::remove_dir_all(&backup_dir);
+    }
+    std::fs::create_dir_all(&tmp_dir).map_err(|e| e.to_string())?;
+
+    fn write_dir(dst_root: &Path, dir: &Dir<'_>) -> Result<(), String> {
+        for entry in dir.entries() {
+            match entry {
+                DirEntry::File(file) => {
+                    let rel = file.path();
+                    let dst = dst_root.join(rel);
+                    if let Some(parent) = dst.parent() {
+                        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                    }
+                    std::fs::write(&dst, file.contents()).map_err(|e| e.to_string())?;
+                }
+                DirEntry::Dir(child) => {
+                    write_dir(dst_root, child)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    write_dir(&tmp_dir, &WORKSPACE_TEMPLATE_EMBEDDED)?;
+
+    std::fs::write(tmp_dir.join(".epris-template-version"), format!("{}\n", version))
+        .map_err(|e| e.to_string())?;
+
+    if dst_root.exists() {
+        if std::fs::rename(dst_root, &backup_dir).is_err() {
+            let _ = std::fs::remove_dir_all(dst_root);
+        }
+    }
+
+    if let Err(e) = std::fs::rename(&tmp_dir, dst_root) {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        if backup_dir.exists() && !dst_root.exists() {
+            let _ = std::fs::rename(&backup_dir, dst_root);
+        }
+        return Err(e.to_string());
+    }
+
+    if backup_dir.exists() {
+        let _ = std::fs::remove_dir_all(&backup_dir);
+    }
+
+    Ok(())
+}
+
+#[cfg(any(test, not(debug_assertions)))]
+fn ensure_embedded_template_dir(app_handle: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let app_dir = app_handle
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+    let template_dir = app_dir.join("workspace-template");
+    let version_file = template_dir.join(".epris-template-version");
+    let current_version = app_handle.package_info().version.to_string();
+
+    let mut needs_extract = true;
+    if let Ok(existing) = std::fs::read_to_string(&version_file) {
+        let looks_complete = template_dir.join("package.json").exists()
+            && template_dir.join("src").join("Root.tsx").exists()
+            && template_dir.join("src").join("Preview.tsx").exists()
+            && template_dir.join("src").join("Composition.tsx").exists()
+            && template_dir.join("src").join("index.tsx").exists()
+            && template_dir.join("src").join("VideoConfig.ts").exists();
+        if existing.trim() == current_version && looks_complete {
+            needs_extract = false;
+        }
+    }
+
+    if !needs_extract {
+        return Ok(template_dir);
+    }
+
+    extract_embedded_template_to(&template_dir, &current_version)?;
+    Ok(template_dir)
+}
+
+pub fn get_mutable_template_dir(app_handle: &tauri::AppHandle) -> Result<Option<PathBuf>, String> {
+    #[cfg(any(test, not(debug_assertions)))]
+    {
+        return ensure_embedded_template_dir(app_handle).map(Some);
+    }
+
+    #[cfg(all(not(test), debug_assertions))]
+    {
+        let _ = app_handle;
+        return Ok(None);
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ProjectInfo {
     pub id: String,
@@ -32,6 +154,12 @@ pub struct ActiveProjectConfig {
 }
 
 fn default_projects_root(app_handle: &tauri::AppHandle) -> Result<PathBuf, String> {
+    // Prefer a user-visible location for projects, so users can easily find/backup/move them.
+    // Fallback to app data dir if Documents isn't available.
+    if let Ok(documents_dir) = app_handle.path().document_dir() {
+        return Ok(documents_dir.join("Epris").join("projects"));
+    }
+
     Ok(app_handle
         .path()
         .app_local_data_dir()
@@ -74,12 +202,42 @@ fn resolve_template_dir(app_handle: &tauri::AppHandle) -> Result<PathBuf, String
 
     #[cfg(not(debug_assertions))]
     {
-        let template = app_handle
-            .path()
-            .resolve("workspace-template", tauri::path::BaseDirectory::Resource)
-            .map_err(|e| format!("Failed to resolve resource 'workspace-template': {}", e))?;
-        return Ok(template);
+        // Always use an app-local, writable template directory extracted from the embedded
+        // workspace template. This avoids relying on platform resource directories (which can be
+        // read-only) and enables one-time “baseline dependency” seeding for future projects.
+        ensure_embedded_template_dir(app_handle)
     }
+}
+
+#[allow(dead_code)]
+fn resource_dir_looks_like_workspace_template(resource_dir: &Path) -> bool {
+    let pkg = resource_dir.join("package.json");
+    if !pkg.exists() {
+        return false;
+    }
+    let content = std::fs::read_to_string(pkg).unwrap_or_default();
+    content.contains("\"name\"") && content.contains("epris-workspace-template")
+}
+
+#[allow(dead_code)]
+fn find_template_dir_in_resource_dir(resource_dir: &Path) -> Option<PathBuf> {
+    // Some bundlers place the directory as-is (resource_dir/workspace-template).
+    // Others may copy directory contents into resource_dir directly.
+    if resource_dir_looks_like_workspace_template(resource_dir) {
+        return Some(resource_dir.to_path_buf());
+    }
+
+    let entries = std::fs::read_dir(resource_dir).ok()?;
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if !p.is_dir() {
+            continue;
+        }
+        if resource_dir_looks_like_workspace_template(&p) {
+            return Some(p);
+        }
+    }
+    None
 }
 
 fn ensure_public_assets_dir(project_path: &Path) -> Result<(), String> {
@@ -160,6 +318,55 @@ fn flatten_if_nested_workspace_template(project_dir: &Path) -> Result<(), String
 
     let _ = std::fs::remove_dir_all(&nested);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn detects_template_when_package_json_is_at_resource_root() {
+        let tmp = tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("package.json"),
+            r#"{ "name": "epris-workspace-template" }"#,
+        )
+        .unwrap();
+
+        let found = find_template_dir_in_resource_dir(tmp.path()).unwrap();
+        assert_eq!(found, tmp.path());
+    }
+
+    #[test]
+    fn detects_template_when_nested_in_workspace_template_dir() {
+        let tmp = tempdir().unwrap();
+        let nested = tmp.path().join("workspace-template");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(
+            nested.join("package.json"),
+            r#"{ "name": "epris-workspace-template" }"#,
+        )
+        .unwrap();
+
+        let found = find_template_dir_in_resource_dir(tmp.path()).unwrap();
+        assert_eq!(found, nested);
+    }
+
+    #[test]
+    fn can_extract_embedded_template_to_app_data_style_dir() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("workspace-template");
+        extract_embedded_template_to(&dst, "0.0.0-test").unwrap();
+        assert!(dst.join("package.json").exists());
+        assert!(dst.join(".epris-template-version").exists());
+        // Regression: ensure nested directories are extracted (src/*.tsx files must exist).
+        assert!(dst.join("src").join("Root.tsx").exists());
+        assert!(dst.join("src").join("Preview.tsx").exists());
+        assert!(dst.join("src").join("Composition.tsx").exists());
+        assert!(dst.join("src").join("index.tsx").exists());
+        assert!(dst.join("src").join("VideoConfig.ts").exists());
+    }
 }
 
 #[tauri::command]
@@ -312,6 +519,7 @@ pub fn create_project(
         s.projects.insert(
             project_id.clone(),
             ProjectState {
+                schema_version: 1,
                 id: project_id.clone(),
                 name: base_name.clone(),
                 path: project_dir.to_string_lossy().to_string(),

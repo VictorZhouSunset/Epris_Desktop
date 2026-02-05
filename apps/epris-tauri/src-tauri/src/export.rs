@@ -4,6 +4,7 @@ use std::io::Write;
 use std::sync::Mutex;
 use crate::utils;
 use tauri::Emitter;
+use tauri::Manager;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use std::process::Stdio;
 
@@ -85,6 +86,22 @@ pub async fn export_video(
         // Run export command asynchronously
         let mut child = utils::create_async_shell_command("pnpm", &["run", "export"])
             .current_dir(&workspace_path)
+            .env(
+                "PATH",
+                {
+                    let app_dir = app_handle
+                        .path()
+                        .app_local_data_dir()
+                        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+                    let toolchain_bin = app_dir.join("toolchain").join("bin");
+                    let sep = if cfg!(target_os = "windows") { ";" } else { ":" };
+                    let current = std::env::var("PATH").unwrap_or_default();
+                    format!("{}{}{}", toolchain_bin.to_string_lossy(), sep, current)
+                },
+            )
+            .env("NO_COLOR", "1")
+            .env("FORCE_COLOR", "0")
+            .env("TERM", "dumb")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()

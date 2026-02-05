@@ -1,33 +1,37 @@
 ---
 name: superpowers
-description: Bootstrap and use the obra/superpowers skill system for Codex
+description: Use the obra/superpowers skill system (already bootstrapped)
 ---
 
 # Superpowers (obra/superpowers)
 
-This repo doesn't ship a standalone Codex `SKILL.md` you can install via the `skill-installer` script (it requires `SKILL.md` in the upstream path). This wrapper skill vendors the upstream setup docs into this repo so you can follow them consistently.
+This project assumes Superpowers is already installed + bootstrapped in your Codex environment. This repo-local skill exists to document the day-to-day commands and point to the vendored reference docs so contributors follow the same workflow.
 
-Upstream: `https://github.com/obra/superpowers/tree/main`
+Upstream: `https://github.com/obra/superpowers`
 
-## Install (global, recommended by upstream)
+## Day-to-day usage
 
-```bash
-mkdir -p ~/.codex/superpowers
-git clone https://github.com/obra/superpowers.git ~/.codex/superpowers
-```
+- Load a Superpowers skill into the current session:
+  ```bash
+  ~/.codex/superpowers/.codex/superpowers-codex use-skill <skill-name>
+  ```
 
-Then add this section to `~/.codex/AGENTS.md`:
+- Re-run the bootstrap (usually only needed after updating your global setup):
+  ```bash
+  ~/.codex/superpowers/.codex/superpowers-codex bootstrap
+  ```
 
-```markdown
-## Superpowers System
+## How this interacts with project skills
 
-<EXTREMELY_IMPORTANT>
-You have superpowers. Superpowers teach you new skills and capabilities. RIGHT NOW run: `~/.codex/superpowers/.codex/superpowers-codex bootstrap` and follow the instructions it returns.
-</EXTREMELY_IMPORTANT>
-```
+- Project-local skills live in `.codex/skills/` (available as soon as you open this repo).
+- Superpowers skills live in `~/.codex/superpowers/skills/` and are loaded on demand via `use-skill`.
+- If a project-specific skill exists for the task, prefer it; otherwise load the relevant Superpowers skill.
 
-## Reference
+## Reference (vendored into this repo)
 
-- Setup doc: `./INSTALL.md`
-- Bootstrap prompt: `./superpowers-bootstrap.md`
+- Codex-specific bootstrap prompt + tool mapping: `./superpowers-bootstrap.md`
+- First-time installation guide (only if you *haven't* already bootstrapped): `./INSTALL.md`
 
+## If you have not installed Superpowers yet
+
+Follow `./INSTALL.md`. This repo intentionally does not vendor the entire upstream Superpowers repository.
