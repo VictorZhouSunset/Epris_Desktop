@@ -2,6 +2,9 @@
 node_modules/
 .pnpm-store/
 
+# Reference
+web_apps/
+
 # Build outputs
 dist/
 target/

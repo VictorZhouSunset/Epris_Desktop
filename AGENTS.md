@@ -18,7 +18,7 @@ The previous implementation plan of this project (which is the V0 stage) is:
 
 I have put the two main references for step 11 in your skills: gemini-cli and opencode-server, these two give you a basic idea of how to integrate these two CLI into Epris.
 
-Right now, I am implementing the V0.5 plan, which is in docs\epris_v_0.5.md.
+The web_apps/ folder contains a former webApp whose UI realization can be of reference to the UI here. Don't modify anything under this, just reference and should be git ignored.
 
 # Modern Full-Stack Development Guidelines
 
