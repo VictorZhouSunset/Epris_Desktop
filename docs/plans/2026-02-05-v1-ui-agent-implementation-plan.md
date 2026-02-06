@@ -10,7 +10,7 @@
 
 **UI Libraries (preferred):**
 - Use mature headless UI primitives where helpful (e.g. Radix UI) instead of bespoke widgets.
-- For color picking, start with native `<input type="color" />` in V1; upgrade to a dedicated library only if needed.
+- For color picking (V1): use `react-colorful` (MIT, lightweight). Install via Windows `pnpm` in `apps/epris-tauri/`.
 - For V1.5+ overlay/transform handles, consider `react-rnd` or similar (but keep it out of V1).
 
 ---
@@ -23,7 +23,7 @@
 - V1 supports primitive controls; composite behavior is mainly achieved by AI refactors (V1.5 adds first-class composite controls).
 - Confirm `id` regex constraint for prop keys: `^[A-Za-z_$][A-Za-z0-9_$]*$`.
 - Confirm controls `target` scope shape: `{kind:"composition", id:"Main"}` reserved vs `{kind:"global"}` reserved.
-- Persistence decision (V1): **Explicit “Save” to disk** (draft in memory). Keep autosave as a fallback only if export/agent workflows become too awkward.
+- Persistence decision (V1): **Explicit Save** (draft in memory; write to disk only on Save and automatically before export).
 
 **Deliverable:**
 - Agree on the JSON schema fields and supported control types in V1.
@@ -50,7 +50,7 @@
 4. Update `Composition.tsx` to define an exported `MainProps` type that matches keys in `epris-props.json` (initially empty/optional) and accepts props.
 5. Add stub JSON files with `schemaVersion: 1`, empty controls/values.
 6. Add minimal instrumented primitives (Route B):
-   - `EprisGroup` + a tiny registry module
+   - `EprisGroup` + a tiny registry module (V1 only; avoid many wrappers)
    - registry can return an object list snapshot for future “scan elements”
    - (do not implement overlay/timeline in V1)
 
@@ -70,11 +70,15 @@
 **Steps:**
 1. Add `get_epris_controls(workspace_path)` and `get_epris_props(workspace_path)` commands.
 2. Add `set_epris_props(workspace_path, values)` command that writes `src/epris-props.json`.
+3. Add `get_epris_objects_snapshot(workspace_path)` (V1 minimal scan):
+   - Sends a postMessage request to the preview iframe? (Not possible from Rust)
+   - Therefore implement scan entirely in frontend via iframe postMessage (preferred for V1).
 3. Validate JSON shape before write:
    - schemaVersion supported
    - object types
    - `values` only contains keys that match the `id` regex (JS identifier)
    - payload size limits (to prevent accidental megabytes)
+   - Validate `epris-controls.json` ids too (when adding a “set controls” command later, or when the UI Agent run completes and the app reloads)
 4. Ensure writes stay within `projectRoot/src/**` (existing sandbox conventions).
 
 **Manual verification:**
@@ -91,24 +95,31 @@
 - Modify: `apps/epris-tauri/src/lib/ipc.ts`
 
 **Steps:**
-1. Define TS types for `EprisControlsSpec` + `EprisPropsFile`.
-2. Implement control components:
+1. Add frontend deps (Windows `pnpm`):
+   - `react-colorful`
+   - `zod`
+2. Define TS types for `EprisControlsSpec` + `EprisPropsFile`.
+3. Add Zod schemas for robustness:
+   - Validate `epris-controls.json` and `epris-props.json` on load.
+   - If invalid, show a non-fatal error panel with details and block rendering controls (avoid UI crash).
+   - Enforce the `id` regex in Zod (same regex as backend).
+4. Implement control components:
    - Slider (number)
-   - Color picker
+   - Color picker (react-colorful)
    - Select
    - Toggle
    - Text input
-3. Render controls below existing video config section (or add a tab/accordion).
-4. On change:
+5. Render controls below existing video config section (or add a tab/accordion).
+6. On change:
    - Update in-memory `draftProps` immediately
    - Emit immediate preview update (via a callback to Task 4’s postMessage sender)
    - Do **not** write to disk here
-5. Add Save UX:
+7. Add Save UX:
    - “Save” button writes `draftProps` to `src/epris-props.json`
    - “Revert” button resets draft back to last saved file values
    - Unsaved indicator (draft != saved)
    - Export always does “Save & Export” automatically if there are unsaved draft props
-6. Add empty/error states (missing JSON, invalid JSON).
+8. Add empty/error states (missing JSON, invalid JSON).
 
 **Manual verification:**
 - Hand-edit `src/epris-controls.json` and `src/epris-props.json` in a workspace; the panel renders controls and can persist changes.
@@ -150,7 +161,9 @@
      - Refactor `Main` props accordingly
      - Keep changes within `src/**`
      - Atomicity: must update `Composition.tsx` + controls + props together
+     - ID rule: all ids must match JS identifier regex; if not possible, rename to a valid id and keep a human label.
      - Composite strategy: if one slider should drive many values, create a new prop and distribute inside `Composition.tsx` (e.g. `themeSize`, `particleSpeed`)
+     - Route B: when creating major “objects”, prefer wrapping them with `<EprisGroup id label kind>` so the Objects/Scan UI can list them (optional; do not force).
 3. When sending the UI Agent prompt, include the current `draftProps` as context in the request payload (do not force-write it to disk).
 4. After completion, reload controls/props and update UI.
    - Set `draftProps` = newly loaded saved props so UI/preview are consistent.
@@ -182,8 +195,18 @@
 - Modify: `apps/epris-tauri/src-tauri/src/gate.rs`
 
 **Steps:**
-1. Add a check that `src/epris-controls.json` and `src/epris-props.json` are valid JSON if present.
-2. (Optional) Ensure every control id has a value, and `values` keys are a superset/subset as desired.
+1. Add a workspace contract validator script (must be inside `src/**` so it is within the sandbox/snapshot scope):
+   - Create: `workspace-template/src/epris/validate-contract.mjs`
+   - Add script in `workspace-template/package.json`:
+     - `"epris:validate": "node src/epris/validate-contract.mjs"`
+2. `epris:validate` checks (fail with non-zero exit code + clear error output):
+   - `epris-controls.json`: schemaVersion, unique ids, id regex, per-type constraints (min/max/options).
+   - `epris-props.json`: schemaVersion, values object, required keys for each control, per-type value constraints.
+   - `Root.tsx`: passes saved props as `defaultProps` for the `Main` composition (regex/AST check).
+   - Optional (warn-only): scan `Composition.tsx` text for control ids to detect obvious “controls don’t affect anything” cases.
+3. Integrate into Gate:
+   - Run `pnpm -s run epris:validate` before `pnpm -s run typecheck` and smoke stills.
+4. If invalid, surface a clear gate error so the agent can fix it (feedback loop for UI Agent).
 
 ---
 
@@ -214,3 +237,20 @@
 2. When user clicks Export:
    - If `draftProps` differs from saved, do the same “Save” flow first (auto Save & Export)
 3. After `checkout_snapshot`, reload controls/props and reset `draftProps` so UI matches the snapshot state.
+
+## Task 9 (V1): Minimal Scan UI (Objects Tab)
+
+**Goal:** Provide a minimal “Scan” that lists instrumented objects in the right panel, inspired by `web_apps/` UX.
+
+**Files:**
+- Modify: `apps/epris-tauri/src/components/ParametersPanel.tsx` (tab + list UI)
+- Modify: `apps/epris-tauri/src/App.tsx` (postMessage request/response wiring)
+- Modify: `workspace-template/src/epris/*` (registry snapshot API)
+- Modify: `workspace-template/src/Preview.tsx` (respond to `epris:getObjectsSnapshot`)
+
+**Steps:**
+1. Add an **Objects** tab in the right panel with a “Scan” button.
+2. On Scan, send `postMessage` to iframe: `{type:"epris:getObjectsSnapshot"}`
+3. Preview replies with `{type:"epris:objectsSnapshot", payload:{objects:[...]}}`
+4. Render object list (collapsed by default); clicking an object shows its metadata (label/kind/tags).
+5. Do not attempt timeline/overlay/keyframes in V1.

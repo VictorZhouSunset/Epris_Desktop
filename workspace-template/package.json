@@ -8,6 +8,7 @@
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1 --port 3030",
     "typecheck": "tsc --noEmit",
+    "epris:validate": "node src/epris/validate-contract.mjs",
     "smoke:0": "pnpm exec remotion still src/Root.tsx Main .epris/tmp/smoke-0.png --frame=0",
     "smoke:mid": "pnpm exec remotion still src/Root.tsx Main .epris/tmp/smoke-mid.png --frame=75",
     "export": "pnpm exec remotion render src/Root.tsx Main out/video.mp4 --codec=h264"

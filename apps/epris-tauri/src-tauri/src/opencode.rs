@@ -38,6 +38,26 @@ pub const OPENCODE_SYSTEM_PROMPT: &str = "You are an expert Remotion animation d
     \
     The current working directory is the workspace root.";
 
+pub const UI_AGENT_PROMPT_PREFIX: &str = "You are acting as Epris UI-Agent.\n\
+\n\
+Goal: Expose/edit tunable props and keep the UI contract consistent.\n\
+\n\
+Hard requirements (atomic): You MUST update all three files together:\n\
+1) src/Composition.tsx (logic uses props)\n\
+2) src/epris-controls.json (control definitions)\n\
+3) src/epris-props.json (current saved values)\n\
+\n\
+If any file is missing or inconsistent, the UI may crash and validation will fail.\n\
+\n\
+Rules:\n\
+- All control ids MUST be valid JS identifiers: ^[A-Za-z_$][A-Za-z0-9_$]*$.\n\
+- If a control belongs to a scanned on-screen object, set control.objectId to the matching <EprisGroup id=\"...\">.\n\
+- Prefer creating a single new prop to control multiple things (e.g. themeSize, particleSpeed) and distribute inside Composition.tsx.\n\
+- Keep changes within src/**.\n\
+- Do not modify package.json / pnpm-lock.yaml.\n\
+\n\
+Optional (for V1 scan): When you create a major on-screen object, prefer wrapping it with <EprisGroup id=... label=... kind=...> so the app can list it in the Objects panel.\n";
+
 fn describe_installed_packages(workspace_path: &str) -> String {
     let pkg_path = std::path::Path::new(workspace_path).join("package.json");
     let bytes = match std::fs::read(&pkg_path) {
@@ -569,6 +589,34 @@ pub async fn send_prompt(
         canceled: false,
         validation_skipped: false,
     })
+}
+
+#[tauri::command]
+pub async fn send_ui_prompt(
+    state: tauri::State<'_, Mutex<OpenCodeState>>,
+    workspace_path: String,
+    prompt: String,
+    provider: String,
+    model: String,
+    draft_props: Option<serde_json::Value>,
+    app_handle: tauri::AppHandle,
+) -> Result<PromptResponse, String> {
+    let mut full_prompt = String::new();
+    full_prompt.push_str(UI_AGENT_PROMPT_PREFIX);
+    full_prompt.push_str("\n\nUSER_REQUEST:\n");
+    full_prompt.push_str(&prompt);
+
+    if let Some(p) = draft_props {
+        if let Ok(text) = serde_json::to_string_pretty(&p) {
+            // Prevent extremely large prompts.
+            let truncated = if text.len() > 50_000 { &text[..50_000] } else { &text };
+            full_prompt.push_str("\n\nCURRENT_DRAFT_PROPS (may differ from saved epris-props.json):\n```json\n");
+            full_prompt.push_str(truncated);
+            full_prompt.push_str("\n```\n");
+        }
+    }
+
+    send_prompt(state, workspace_path, full_prompt, provider, model, app_handle).await
 }
 
 async fn resolve_opencode_model(

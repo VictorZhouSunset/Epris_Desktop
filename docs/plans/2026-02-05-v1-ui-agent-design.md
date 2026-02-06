@@ -42,6 +42,11 @@ Because control ids become `Main` prop keys, require:
   - Recommendation: `^[A-Za-z_$][A-Za-z0-9_$]*$`
   - Practical tip for the agent: use `camelCase` like `rectColor`, `particleSpeed`, `themeSize`.
 
+Enforcement strategy:
+- Backend rejects invalid ids when writing props/controls through IPC.
+- Frontend validates loaded specs and shows diagnostics instead of crashing.
+- UI Agent prompt explicitly requires valid ids, and the run is treated as failed if invalid.
+
 ## Contracts
 
 ### C1 — Prop Contract
@@ -94,7 +99,9 @@ Key principle: **do not restrict freeform AI code generation**.
 Design sketch:
 - Provide wrappers like:
   - `<EprisGroup id label kind>...</EprisGroup>`
-  - `<EprisRect id label ... />`, `<EprisText ... />`, `<EprisImage ... />` (minimal set)
+- Keep wrappers minimal in V1 to avoid restricting AI:
+  - Start with only `<EprisGroup ...>` (non-invasive wrapper that just returns children).
+  - Add more specialized wrappers later only if we need better bounds/highlight behavior.
 - Each primitive registers metadata into an in-iframe registry:
   - `id` (JS identifier, stable)
   - `label` (human friendly)
@@ -107,12 +114,21 @@ Design sketch:
 This gives us a path to UI like your former webapp (object list → property panel → optional overlay),
 without forcing a schema-driven renderer.
 
+### V1 Minimal “Scan”
+
+V1 adds a minimal scan button that reads the in-iframe registry and shows an object list.
+- No overlay
+- No timeline
+- No keyframes
+
+The goal is navigation + “not too messy”, not full editability yet.
+
 ## UI Controls: Prebuilt Component Registry (Epris App)
 
 The Epris app ships a small “control registry”:
 - `number/slider`
 - `number/input`
-- `color`
+- `color` (use `react-colorful` in V1 for better UX)
 - `select`
 - `boolean/toggle`
 - `text`
@@ -153,30 +169,22 @@ Observations:
 - UI updates and preview response should be immediate (smooth slider drag).
 - Writing to disk too frequently can be noisy and may trigger dev-server/HMR work depending on tooling.
 
-Two viable models:
-1) **Debounced autosave (fallback, simpler to implement)**:
-   - UI state: immediate
-   - postMessage: immediate
-   - disk write (`src/epris-props.json`): debounce 500ms–1000ms
-2) **Explicit Save (stronger UX, more work)**:
-   - UI + postMessage: immediate (draft state)
-   - disk write only on “Save”
-   - Export must either (a) force-save or (b) ask user to save first
-   - Snapshot DAG semantics become cleaner: “Save” creates a snapshot boundary; undo can revert to last save
-
-**Recommendation (given “freeform code generation first” + smooth UX): Choose Explicit Save for V1.**
+V1 persistence is **fixed** to: **Explicit Save** (no autosave).
 
 Concretely:
 - `src/epris-props.json` is the **saved/export** source of truth.
 - The app maintains an in-memory `draftProps`:
   - UI updates: immediate
   - postMessage to preview: immediate
-  - disk write: only on **Save** (and/or “Save before export”)
+  - disk write: only on **Save** and automatically before export (**Save & Export**)
 
 Implications:
 - The app must surface “unsaved changes” state (draft != saved).
-- Export must auto-save draft props first, or require the user to save.
+- Export must auto-save draft props first (**Save & Export**).
 - When triggering UI Agent again, include `draftProps` in the prompt context (so the agent doesn’t rely only on on-disk values).
+
+Out of scope for V1:
+- Debounced autosave writes during slider drag.
 
 ## Provider (AI) Responsibilities
 
@@ -196,6 +204,22 @@ To prevent UI breakage, the UI-Agent system prompt should explicitly require:
 - Update `src/epris-props.json` (initial values)
 
 “Missing any one of these is a failure.”
+
+## Contract Validator (Programmatic “Do they match?”)
+
+Yes—add a programmatic validator so the agent gets a hard pass/fail signal.
+
+Proposal:
+- Add a workspace script `pnpm -s run epris:validate` that checks:
+  1) `src/epris-controls.json` is valid (schemaVersion, types, unique ids, id regex).
+  2) `src/epris-props.json` is valid and covers all control ids (and values match type constraints).
+  3) `src/Root.tsx` uses saved props as `defaultProps` for the `Main` composition.
+  4) `src/Composition.tsx` compiles (via existing `typecheck`) and is allowed to ignore extra props.
+     - Optional (best-effort): warn if none of the control ids appear referenced in `Composition.tsx` (helps catch “controls exist but do nothing”).
+- Integrate it into the existing Gate pipeline so UI-agent runs must pass it.
+
+Limitations:
+- This cannot prove the props are *used* correctly in the animation, only that the contract files are aligned and won’t crash the UI.
 
 ## App Responsibilities
 

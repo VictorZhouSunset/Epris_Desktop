@@ -16,12 +16,13 @@ References:
 - `docs/plans/2026-02-05-v1-ui-agent-implementation-plan.md`
 
 - [ ] Confirm V1 contracts: `src/epris-controls.json` + `src/epris-props.json` (+ `id` regex, + target scope)
-- [ ] Persistence: explicit Save (draft in memory; write on Save/export)
+- [ ] Persistence: explicit Save only (draft in memory; write on Save/export)
 - [ ] Add workspace-template stubs (controls/props files + Preview postMessage + Root defaultProps)
 - [ ] Add workspace-template Route-B primitives (optional wrappers + registry)
 - [ ] Backend IPC: read/write controls + props
 - [ ] Frontend: control registry (slider/color/select/toggle/text)
 - [ ] Frontend: right panel UI Agent prompt + trigger provider run
+- [ ] Frontend: Objects tab + minimal Scan (primitives registry)
 - [ ] Preview live update via iframe postMessage
 - [ ] Update provider rules (REMOTION.md generator) for prop-first + controls/props contract
 - [ ] DAG: Save props creates snapshot; export auto-save & export

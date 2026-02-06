@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "target": { "kind": "composition", "id": "Main" },
+  "controls": [
+    {
+      "id": "backgroundColor",
+      "label": "Background Color",
+      "objectId": "background",
+      "type": "color",
+      "ui": "color",
+      "group": "Style"
+    },
+    {
+      "id": "titleText",
+      "label": "Text",
+      "objectId": "title",
+      "type": "text",
+      "ui": "text",
+      "group": "Content",
+      "placeholder": "Title text..."
+    },
+    {
+      "id": "titleColor",
+      "label": "Text Color",
+      "objectId": "title",
+      "type": "color",
+      "ui": "color",
+      "group": "Style"
+    },
+    {
+      "id": "titleFontSize",
+      "label": "Font Size",
+      "objectId": "title",
+      "type": "number",
+      "ui": "slider",
+      "group": "Style",
+      "min": 12,
+      "max": 160,
+      "step": 1
+    },
+    {
+      "id": "titleFontFamily",
+      "label": "Font",
+      "objectId": "title",
+      "type": "select",
+      "ui": "select",
+      "group": "Style",
+      "options": ["sans-serif", "serif", "monospace"]
+    }
+  ]
+}

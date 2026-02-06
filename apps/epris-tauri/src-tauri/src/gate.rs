@@ -201,6 +201,36 @@ pub async fn run_gate_with_mode(
         }
         Ok(out)
     };
+
+    // Step 0: Epris contract validation (best-effort; required when present)
+    set_progress(95.0, "Gate: Epris contract");
+    println!("[Epris] Gate Step 0/3: Running epris:validate...");
+    let validate_output = match run_step(&["run", "epris:validate"]) {
+        Ok(o) => o,
+        Err(e) => {
+            result.error_output = e.clone();
+            result.error = Some(e);
+            result.total_duration_sec = gate_start.elapsed().as_secs_f64();
+            log_gate_result(&workspace_path, &result);
+            return Ok(result);
+        }
+    };
+    if !validate_output.status.success() {
+        let stderr = String::from_utf8_lossy(&validate_output.stderr);
+        // Older projects may not have the script yet. Treat this as a skip.
+        if stderr.contains("Missing script: epris:validate") {
+            println!("[Epris] Gate: epris:validate script missing; skipping.");
+        } else {
+            result.error_output = format!(
+                "Epris contract validation failed:\n{}",
+                stderr.chars().take(2000).collect::<String>()
+            );
+            result.error = Some(result.error_output.clone());
+            result.total_duration_sec = gate_start.elapsed().as_secs_f64();
+            log_gate_result(&workspace_path, &result);
+            return Ok(result);
+        }
+    }
     
     // Step 1: Typecheck
     set_progress(96.0, "Gate: Typecheck");

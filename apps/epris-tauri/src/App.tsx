@@ -31,12 +31,17 @@ import { usePreviewServer } from './hooks/usePreviewServer';
 import { useProjects } from './hooks/useProjects';
 import { usePrompt } from './hooks/usePrompt';
 import { useSnapshot } from './hooks/useSnapshot';
+import { useUiProps } from './hooks/useUiProps';
 import { useWaitPort } from './hooks/useWaitPort';
 import type { SttStatus } from './types/backend';
+import { IpcService } from './lib/ipc';
 
 function App() {
   const [promptInput, setPromptInput] = useState('');
   const [iframeKey, setIframeKey] = useState(0);
+  const previewIframeRef = useRef<HTMLIFrameElement | null>(null);
+  const [objectsSnapshot, setObjectsSnapshot] = useState<any[] | null>(null);
+  const uiDraftValuesRef = useRef<Record<string, unknown>>({});
   const [showHistory, setShowHistory] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showAssets, setShowAssets] = useState(false);
@@ -117,6 +122,51 @@ function App() {
   } = usePreviewServer(workspacePath, isEnvReady);
   const { status: openCodeStatus, error: openCodeError } = useOpenCode(workspacePath, isEnvReady);
   const previewUrl = previewStatus === 'running' && port ? `http://127.0.0.1:${port}` : null;
+
+  const postToPreview = useCallback((message: unknown) => {
+    previewIframeRef.current?.contentWindow?.postMessage(message, '*');
+  }, []);
+
+  const sendInputPropsToPreview = useCallback(
+    (values: Record<string, unknown>) => {
+      postToPreview({ type: 'epris:setInputProps', payload: values });
+    },
+    [postToPreview],
+  );
+
+  const requestObjectsScan = useCallback(() => {
+    if (!workspacePath) return;
+    // Backend fallback: works even if the workspace Preview.tsx doesn't support scan yet.
+    IpcService.call<any[]>('SCAN_EPRIS_OBJECTS', { workspacePath })
+      .then((objects) => {
+        if (Array.isArray(objects)) setObjectsSnapshot(objects);
+      })
+      .catch(() => {});
+
+    // Runtime scan (preferred when supported).
+    postToPreview({ type: 'epris:getObjectsSnapshot' });
+  }, [postToPreview, workspacePath]);
+
+  // Preview -> App postMessage bridge (handshake + scan results)
+  useEffect(() => {
+    const onMessage = (event: MessageEvent) => {
+      const data = event.data as any;
+      if (!data || typeof data !== 'object') return;
+
+      if (data.type === 'epris:ready') {
+        sendInputPropsToPreview(uiDraftValuesRef.current || {});
+        requestObjectsScan();
+        return;
+      }
+
+      if (data.type === 'epris:objectsSnapshot') {
+        const objects = data.payload?.objects;
+        if (Array.isArray(objects)) setObjectsSnapshot(objects);
+      }
+    };
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
+  }, [sendInputPropsToPreview, requestObjectsScan]);
 
   const { waitPort } = useWaitPort();
   const reloadPreview = useCallback(async () => {
@@ -376,6 +426,12 @@ function App() {
   } = useExport(workspacePath);
   const { getHead, checkUnsavedChanges, manualSaveSnapshot } = useSnapshot(workspacePath);
 
+  const uiProps = useUiProps(workspacePath, { sendToPreview: sendInputPropsToPreview });
+
+  useEffect(() => {
+    uiDraftValuesRef.current = uiProps.state.draftValues;
+  }, [uiProps.state.draftValues]);
+
   // Poll for unsaved changes
   useEffect(() => {
     if (!workspacePath) return;
@@ -557,12 +613,13 @@ function App() {
     if (!name) return;
     const desc = prompt('Enter description (optional):', '');
     try {
+      await uiProps.actions.saveIfDirty();
       const currentHead = await getHead();
       await manualSaveSnapshot(name, desc || '', currentHead);
     } catch (err) {
       alert('Save failed: ' + (err instanceof Error ? err.message : String(err)));
     }
-  }, [workspacePath, manualSaveSnapshot, getHead]);
+  }, [workspacePath, manualSaveSnapshot, getHead, uiProps.actions.saveIfDirty]);
 
   const handleSubmit = useCallback(async () => {
     if (!promptInput.trim()) return;
@@ -573,11 +630,12 @@ function App() {
 
   const handleExport = useCallback(async () => {
     try {
+      await uiProps.actions.saveIfDirty();
       await exportVideo();
     } catch (err) {
       alert('Export failed: ' + (err instanceof Error ? err.message : String(err)));
     }
-  }, [exportVideo]);
+  }, [exportVideo, uiProps.actions]);
 
   const handleViewLogs = useCallback(async () => {
     if (!workspacePath) return;
@@ -633,6 +691,7 @@ function App() {
       } catch {}
       await setActiveProject(projectId);
       setIframeKey((k) => k + 1);
+      setObjectsSnapshot(null);
     },
     [overview?.active_project_id, setActiveProject, workspacePath],
   );
@@ -856,6 +915,16 @@ function App() {
       await invoke('cancel_current_run');
     } catch {}
   }, [workspacePath]);
+
+  const handleReloadAfterCheckout = useCallback(() => {
+    setObjectsSnapshot(null);
+    void uiProps.actions
+      .reload()
+      .catch(() => {})
+      .finally(() => {
+        reloadPreview().catch(() => {});
+      });
+  }, [uiProps.actions, reloadPreview]);
 
   return (
     <div className="flex flex-col h-screen bg-slate-900 text-slate-100 font-sans">
@@ -1087,6 +1156,7 @@ function App() {
                 ) : previewUrl ? (
                   <iframe
                     key={iframeKey}
+                    ref={previewIframeRef}
                     src={`${previewUrl}?t=${iframeKey}`}
                     className="w-full h-full border-0"
                     title="Remotion Preview"
@@ -1268,6 +1338,12 @@ function App() {
             workspacePath={workspacePath}
             onApplied={reloadPreview}
             onCollapse={() => setIsParametersPanelOpen(false)}
+            provider={provider}
+            model={model}
+            uiPropsState={uiProps.state}
+            uiPropsActions={uiProps.actions}
+            objectsSnapshot={objectsSnapshot}
+            onScanObjects={requestObjectsScan}
           />
         )}
         {workspacePath && !isParametersPanelOpen && (
@@ -1286,7 +1362,7 @@ function App() {
         <SnapshotHistory
           workspacePath={workspacePath}
           onClose={() => setShowHistory(false)}
-          onReloadPreview={reloadPreview}
+          onReloadPreview={handleReloadAfterCheckout}
           hasUnsavedChanges={hasUnsavedChanges}
         />
       )}

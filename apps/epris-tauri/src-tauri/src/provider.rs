@@ -194,6 +194,12 @@ impl ProviderManager {
                 - Only modify files inside `src/**` and `public/**`.\n\
                 - All images, audio, and fonts must live in `public/` and be referenced with `staticFile()`.\n\
                 - Do not create standalone HTML files or scripts outside `src`.\n\n\
+                ## 1.1 UI Props (Epris)\n\n\
+                - Epris can expose tunable props via two files:\n\
+                  - `src/epris-controls.json` (control definitions)\n\
+                  - `src/epris-props.json` (saved values, used for export)\n\
+                - If you add or change exposed props, update both files and ensure `src/Root.tsx` passes `defaultProps`.\n\
+                - Optional: wrap major objects with `<EprisGroup id label kind>...</EprisGroup>` so the app can list them.\n\n\
                 ## 2. Entry Files\n\n\
                 ### `src/Root.tsx`\n\n\
                 **Allowed:**\n\

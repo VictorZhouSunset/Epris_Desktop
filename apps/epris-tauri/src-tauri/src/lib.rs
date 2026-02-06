@@ -13,6 +13,8 @@ mod sandbox;
 mod toolchain;
 mod maintenance;
 mod install_log;
+mod ui_props;
+mod ui_objects;
 
 use std::sync::Mutex;
 use tauri::Manager;
@@ -277,6 +279,7 @@ pub fn run() {
             opencode::stop_opencode, 
             opencode::cancel_current_run,
             opencode::send_prompt,
+            opencode::send_ui_prompt,
             opencode::clear_session,
             gate::run_gate,
             gate::stop_gate_validation,
@@ -318,6 +321,10 @@ pub fn run() {
             assets::upload_asset,
             assets::delete_asset,
             assets::rename_asset,
+            ui_props::get_epris_controls,
+            ui_props::get_epris_props,
+            ui_props::set_epris_props,
+            ui_objects::scan_epris_objects,
             stt::get_stt_status,
             stt::install_whispercpp,
             stt::transcribe_whispercpp,

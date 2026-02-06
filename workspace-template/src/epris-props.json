@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "values": {
+    "backgroundColor": "#0f172a",
+    "titleText": "Hello Epris",
+    "titleColor": "#ffffff",
+    "titleFontSize": 80,
+    "titleFontFamily": "sans-serif"
+  }
+}
