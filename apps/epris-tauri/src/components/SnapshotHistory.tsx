@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { useSnapshot } from '../hooks/useSnapshot';
 import { useCallback, useEffect, useState } from 'react';
+import { SaveSnapshotModal } from './SaveSnapshotModal';
 import { 
   ReactFlow, 
   Background, 
@@ -151,6 +152,9 @@ export function SnapshotHistory({ onClose, workspacePath, onReloadPreview, hasUn
   const { dag, loading, checkoutSnapshot, deleteSnapshotTree, getHead, manualSaveSnapshot, updateMetadata, clearHistory, saveSnapshotLayout } = useSnapshot(workspacePath, onReloadPreview);
   const [headId, setHeadId] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [showSaveSnapshotModal, setShowSaveSnapshotModal] = useState(false);
+  const [saveSnapshotDefaultName, setSaveSnapshotDefaultName] = useState('');
+  const [saveSnapshotError, setSaveSnapshotError] = useState<string | null>(null);
   
   // React Flow state management for smooth dragging
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
@@ -174,16 +178,26 @@ export function SnapshotHistory({ onClose, workspacePath, onReloadPreview, hasUn
     try { await deleteSnapshotTree(id); } catch (err) { alert('Delete failed: ' + err); }
   }, [deleteSnapshotTree]);
 
-  const handleManualSave = useCallback(async () => {
+  const handleManualSave = useCallback(() => {
     if (!workspacePath) return;
-    const name = prompt('Enter snapshot name:', `Manual ${new Date().toLocaleTimeString()}`);
-    if (!name) return;
-    const desc = prompt('Enter description (optional):', '');
+    setSaveSnapshotDefaultName(`Manual ${new Date().toLocaleTimeString()}`);
+    setSaveSnapshotError(null);
+    setShowSaveSnapshotModal(true);
+  }, [workspacePath]);
+
+  const handleSaveSnapshotModalSubmit = useCallback(async (name: string, description: string) => {
+    if (!workspacePath) return;
     try {
       setIsSaving(true);
+      setSaveSnapshotError(null);
       const currentHead = await getHead();
-      await manualSaveSnapshot(name, desc || '', currentHead);
-    } catch (err) { alert('Save failed: ' + err); } finally { setIsSaving(false); }
+      await manualSaveSnapshot(name, description, currentHead);
+      setShowSaveSnapshotModal(false);
+    } catch (err) {
+      setSaveSnapshotError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsSaving(false);
+    }
   }, [workspacePath, manualSaveSnapshot, getHead]);
 
   const handleUpdateMetadata = async () => {
@@ -398,6 +412,21 @@ export function SnapshotHistory({ onClose, workspacePath, onReloadPreview, hasUn
           </ReactFlow>
         )}
       </div>
+
+      <SaveSnapshotModal
+        isOpen={showSaveSnapshotModal}
+        title="Save Current State"
+        defaultName={saveSnapshotDefaultName}
+        defaultDescription=""
+        busy={isSaving}
+        error={saveSnapshotError}
+        onClose={() => {
+          if (isSaving) return;
+          setShowSaveSnapshotModal(false);
+          setSaveSnapshotError(null);
+        }}
+        onSubmit={handleSaveSnapshotModalSubmit}
+      />
 
       {/* Metadata Edit Modal */}
       {editingNode && (

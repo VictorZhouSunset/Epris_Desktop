@@ -22,11 +22,21 @@ function stableStringify(value: unknown): string {
 }
 
 function normalizeControl(control: EprisControlSpec): EprisControlSpec {
-  if (control.type !== 'select') return control;
-  return {
-    ...control,
-    options: control.options.map((opt) => (typeof opt === 'string' ? { value: opt, label: opt } : opt)),
-  };
+  if (control.type === 'select') {
+    return {
+      ...control,
+      options: control.options.map((opt) => (typeof opt === 'string' ? { value: opt, label: opt } : opt)),
+    };
+  }
+
+  if (control.type === 'boolean' && control.ui === 'checkbox') {
+    return {
+      ...control,
+      ui: 'toggle',
+    };
+  }
+
+  return control;
 }
 
 export type UiPropsLoadState = {

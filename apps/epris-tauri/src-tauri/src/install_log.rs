@@ -12,6 +12,10 @@ fn env_install_log_path(base_dir: &Path) -> PathBuf {
     base_dir.join("logs").join("env-install.log")
 }
 
+fn env_check_log_path(base_dir: &Path) -> PathBuf {
+    base_dir.join("logs").join("env-check.log")
+}
+
 fn append_line(path: &Path, line: &str) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -52,6 +56,15 @@ pub fn log_env_install(
     }
 }
 
+pub fn log_env_check(app_data_dir: Option<&Path>, workspace_path: Option<&Path>, line: &str) {
+    if let Some(app_dir) = app_data_dir {
+        append_line(&env_check_log_path(app_dir), line);
+    }
+    if let Some(ws) = workspace_path {
+        append_line(&env_check_log_path(ws), line);
+    }
+}
+
 pub fn begin_env_install(
     window: Option<&tauri::Window>,
     app_data_dir: Option<&Path>,
@@ -66,4 +79,3 @@ pub fn begin_env_install(
         &format!("=== Env install started (provider: {}, workspace: {}) ===", provider, workspace),
     );
 }
-

@@ -22,6 +22,20 @@ export interface PromptResponse {
   validation_skipped?: boolean;
 }
 
+export interface AgentPlanStep {
+  title: string;
+  done: boolean;
+}
+
+export interface AgentPlanState {
+  exists: boolean;
+  path: string;
+  steps: AgentPlanStep[];
+  completed: number;
+  total: number;
+  updated_at?: string | null;
+}
+
 export interface SnapshotMetadata {
   id: string;
   name: string;

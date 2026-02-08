@@ -38,7 +38,7 @@ export type EprisControlSpec =
       label: string;
       objectId?: string;
       type: 'boolean';
-      ui?: 'toggle';
+      ui?: 'toggle' | 'checkbox';
       group?: string;
     }
   | {
@@ -46,7 +46,7 @@ export type EprisControlSpec =
       label: string;
       objectId?: string;
       type: 'text';
-      ui?: 'text';
+      ui?: 'text' | 'textarea';
       group?: string;
       placeholder?: string;
     };
@@ -90,12 +90,12 @@ const SelectControl = ControlBase.extend({
 
 const BooleanControl = ControlBase.extend({
   type: z.literal('boolean'),
-  ui: z.literal('toggle').optional(),
+  ui: z.enum(['toggle', 'checkbox']).optional(),
 });
 
 const TextControl = ControlBase.extend({
   type: z.literal('text'),
-  ui: z.literal('text').optional(),
+  ui: z.enum(['text', 'textarea']).optional(),
   placeholder: z.string().optional(),
 });
 

@@ -18,6 +18,7 @@ export const TAURI_COMMANDS = {
   CANCEL_CURRENT_RUN: 'cancel_current_run',
   SEND_PROMPT: 'send_prompt',
   SEND_UI_PROMPT: 'send_ui_prompt',
+  GET_AGENT_PLAN_STATE: 'get_agent_plan_state',
   CLEAR_SESSION: 'clear_session',
   RUN_GATE: 'run_gate',
   STOP_GATE_VALIDATION: 'stop_gate_validation',

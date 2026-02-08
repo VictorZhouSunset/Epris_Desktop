@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { RefreshCw, Check, AlertTriangle, Loader2, Download, X } from 'lucide-react';
@@ -21,7 +21,6 @@ interface EnvironmentStatus {
 interface FirstRunWizardProps {
   workspacePath?: string;
   provider: string; // 'opencode' | 'gemini'
-  onComplete: () => void;
   onClose?: () => void;
 }
 
@@ -31,7 +30,7 @@ interface BaselinePackagesInfo {
   missing_in_template: string[];
 }
 
-export function FirstRunWizard({ workspacePath, provider, onComplete, onClose }: FirstRunWizardProps) {
+export function FirstRunWizard({ workspacePath, provider, onClose }: FirstRunWizardProps) {
   const [status, setStatus] = useState<EnvironmentStatus | null>(null);
   const [baseline, setBaseline] = useState<BaselinePackagesInfo | null>(null);
   const [loading, setLoading] = useState(true);
@@ -46,11 +45,6 @@ export function FirstRunWizard({ workspacePath, provider, onComplete, onClose }:
   const [sttProgress, setSttProgress] = useState<string>('');
   const [sttProgressPercent, setSttProgressPercent] = useState<number | null>(null);
   const [sttModel, setSttModel] = useState<'tiny' | 'tiny.en' | 'small'>('tiny.en');
-
-  const onCompleteRef = useRef(onComplete);
-  useEffect(() => {
-    onCompleteRef.current = onComplete;
-  }, [onComplete]);
 
   const checkEnv = useCallback(async () => {
     if (!workspacePath) return;
@@ -67,17 +61,6 @@ export function FirstRunWizard({ workspacePath, provider, onComplete, onClose }:
         setBaseline(info);
       } catch {
         setBaseline(null);
-      }
-      
-      // Auto-complete if everything is ready
-      if (
-        env.node_valid && 
-        env.pnpm_valid && 
-        env.provider_cli_valid && 
-        env.workspace_deps_valid && 
-        env.skills_valid
-      ) {
-        onCompleteRef.current();
       }
     } catch (err) {
       setError(String(err));
@@ -210,17 +193,6 @@ export function FirstRunWizard({ workspacePath, provider, onComplete, onClose }:
       setSttInstalling(false);
     }
   };
-
-  const isComplete = Boolean(
-    status &&
-      status.node_valid &&
-      status.pnpm_valid &&
-      status.provider_cli_valid &&
-      status.workspace_deps_valid &&
-      status.skills_valid,
-  );
-
-  if (isComplete) return null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/90 backdrop-blur-sm p-4">

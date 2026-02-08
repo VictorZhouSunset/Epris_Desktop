@@ -12,8 +12,15 @@ use crate::toolchain;
 use std::io::Write;
 use crate::install_log;
 use crate::projects;
+#[cfg(target_os = "windows")]
+use std::collections::{HashMap, HashSet};
+#[cfg(target_os = "windows")]
+use std::sync::{Mutex, OnceLock, RwLock};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::atomic::AtomicU64;
+#[cfg(target_os = "windows")]
+use std::time::Duration;
+use std::time::Instant;
 
 const BASELINE_NPM_PACKAGES: &[&str] = &[
     // Validation / determinism
@@ -63,7 +70,7 @@ fn should_emit_pnpm_line_to_ui(line: &str) -> bool {
     false
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct EnvironmentStatus {
     pub node_valid: bool,
     pub pnpm_valid: bool,
@@ -94,6 +101,21 @@ pub struct EnvironmentManager {
 
 static ENV_INSTALL_CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
 static ENV_INSTALL_CURRENT_PID: AtomicU32 = AtomicU32::new(0);
+#[cfg(target_os = "windows")]
+static PROVIDER_CLI_VERSION_CACHE: OnceLock<RwLock<HashMap<String, ProviderCliVersionCacheEntry>>> =
+    OnceLock::new();
+#[cfg(target_os = "windows")]
+static PROVIDER_CLI_PROBE_IN_FLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+#[cfg(target_os = "windows")]
+const PROVIDER_CLI_VERSION_CACHE_TTL: Duration = Duration::from_secs(600);
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone)]
+struct ProviderCliVersionCacheEntry {
+    checked_at: Instant,
+    version: String,
+}
 
 fn kill_pid_tree(pid: u32) {
     if pid == 0 {
@@ -124,6 +146,56 @@ fn env_install_canceled() -> bool {
     ENV_INSTALL_CANCEL_REQUESTED.load(Ordering::SeqCst)
 }
 
+fn log_env_check_timing(toolchain_dir: &std::path::Path, workspace_path: Option<&str>, line: &str) {
+    let app_data_dir = install_log::toolchain_dir_to_app_data_dir(toolchain_dir);
+    let ws_path = workspace_path.map(std::path::PathBuf::from);
+    install_log::log_env_check(app_data_dir.as_deref(), ws_path.as_deref(), line);
+    println!("[Epris][EnvCheck] {}", line);
+}
+
+#[cfg(target_os = "windows")]
+fn provider_cli_version_cache() -> &'static RwLock<HashMap<String, ProviderCliVersionCacheEntry>> {
+    PROVIDER_CLI_VERSION_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+#[cfg(target_os = "windows")]
+fn provider_cli_probe_in_flight() -> &'static Mutex<HashSet<String>> {
+    PROVIDER_CLI_PROBE_IN_FLIGHT.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+#[cfg(target_os = "windows")]
+fn get_cached_provider_cli_version(program: &str) -> Option<String> {
+    let cache = provider_cli_version_cache();
+    let guard = match cache.read() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    };
+    let entry = guard.get(program)?;
+    if entry.checked_at.elapsed() > PROVIDER_CLI_VERSION_CACHE_TTL {
+        return None;
+    }
+    if entry.version.trim().is_empty() {
+        return None;
+    }
+    Some(entry.version.clone())
+}
+
+#[cfg(target_os = "windows")]
+fn set_cached_provider_cli_version(program: &str, version: String) {
+    let cache = provider_cli_version_cache();
+    let mut guard = match cache.write() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    };
+    guard.insert(
+        program.to_string(),
+        ProviderCliVersionCacheEntry {
+            checked_at: Instant::now(),
+            version,
+        },
+    );
+}
+
 #[tauri::command]
 pub fn cancel_env_install() -> Result<(), String> {
     ENV_INSTALL_CANCEL_REQUESTED.store(true, Ordering::SeqCst);
@@ -146,6 +218,17 @@ impl EnvironmentManager {
     }
 
     pub fn check_environment(&self, provider: &str, workspace_path: Option<&str>) -> EnvironmentStatus {
+        let total_started = Instant::now();
+        log_env_check_timing(
+            &self.toolchain_dir,
+            workspace_path,
+            &format!(
+                "check_environment start provider={} workspace={}",
+                provider,
+                workspace_path.unwrap_or("<none>")
+            ),
+        );
+
         let mut status = EnvironmentStatus {
             node_valid: false,
             pnpm_valid: false,
@@ -157,6 +240,7 @@ impl EnvironmentManager {
         };
  
         // Check Node
+        let node_started = Instant::now();
         match self.check_command("node", &["--version"]) {
             Ok(v) => {
                 status.node_valid = true;
@@ -166,8 +250,18 @@ impl EnvironmentManager {
             },
             Err(_) => status.missing.push("node".into()),
         }
+        log_env_check_timing(
+            &self.toolchain_dir,
+            workspace_path,
+            &format!(
+                "check_environment node: {} ms (valid={})",
+                node_started.elapsed().as_millis(),
+                status.node_valid
+            ),
+        );
  
         // Check pnpm
+        let pnpm_started = Instant::now();
         match self.check_command("pnpm", &["--version"]) {
             Ok(v) => {
                 status.pnpm_valid = true;
@@ -176,40 +270,92 @@ impl EnvironmentManager {
             },
             Err(_) => status.missing.push("pnpm".into()),
         }
+        log_env_check_timing(
+            &self.toolchain_dir,
+            workspace_path,
+            &format!(
+                "check_environment pnpm: {} ms (valid={})",
+                pnpm_started.elapsed().as_millis(),
+                status.pnpm_valid
+            ),
+        );
  
         // Check Provider (opencode or gemini)
         let cmd = if provider == "gemini" { "gemini" } else { "opencode" };
-        let candidates: &[&[&str]] = &[
-            &["--version"],
-            &["version"],
-            &["--help"],
-            &["help"],
-        ];
-        match self.check_command_any(cmd, candidates) {
-            Ok(v) => {
-                status.provider_cli_valid = true;
-                let source = self.detect_source_from_where(cmd).unwrap_or_else(|| {
-                    if self.is_local(cmd)
-                        || self.is_local(&format!("{}.cmd", cmd))
-                        || self.is_local(&format!("{}.exe", cmd))
-                    {
-                        "local".to_string()
-                    } else {
-                        "system".to_string()
-                    }
-                });
-                status.details.provider_cli = Some(ToolchainVersion {
-                    version: v,
-                    source: source.into(),
-                });
-            }
-            Err(_) => {
+        let provider_started = Instant::now();
+        #[cfg(target_os = "windows")]
+        {
+            // Fast path: `where` check is significantly cheaper than spawning provider CLI.
+            let resolved_path = self.command_exists(cmd);
+            let local_exists = self.is_local(cmd)
+                || self.is_local(&format!("{}.cmd", cmd))
+                || self.is_local(&format!("{}.exe", cmd));
+            if resolved_path.is_none() && !local_exists {
                 status.missing.push(cmd.into());
+            } else {
+                status.provider_cli_valid = true;
+                let source = resolved_path
+                    .as_deref()
+                    .map(|p| self.source_from_resolved_path(p))
+                    .unwrap_or_else(|| {
+                        if local_exists {
+                            "local".to_string()
+                        } else {
+                            "system".to_string()
+                        }
+                    });
+
+                let cached_version = get_cached_provider_cli_version(cmd);
+                if let Some(v) = cached_version.clone() {
+                    if !v.trim().is_empty() {
+                        status.details.provider_cli = Some(ToolchainVersion {
+                            version: v,
+                            source,
+                        });
+                    }
+                } else {
+                    // Populate version cache in background to keep status checks responsive.
+                    self.maybe_spawn_provider_cli_version_probe(cmd);
+                }
             }
-        };
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let candidates: &[&[&str]] = &[
+                &["--version"],
+                &["version"],
+                &["--help"],
+                &["help"],
+            ];
+            match self.check_command_any(cmd, candidates) {
+                Ok(v) => {
+                    status.provider_cli_valid = true;
+                    status.details.provider_cli = Some(ToolchainVersion {
+                        version: v,
+                        source: "system".into(),
+                    });
+                }
+                Err(_) => {
+                    status.missing.push(cmd.into());
+                }
+            };
+        }
+        log_env_check_timing(
+            &self.toolchain_dir,
+            workspace_path,
+            &format!(
+                "check_environment provider_cli({}): {} ms (valid={})",
+                cmd,
+                provider_started.elapsed().as_millis(),
+                status.provider_cli_valid
+            ),
+        );
  
         // Check Workspace Deps
         if let Some(path) = workspace_path {
+            let ws_path = std::path::Path::new(path);
+
+            let deps_started = Instant::now();
             let node_modules = std::path::Path::new(path).join("node_modules");
             let pnpm_dir = node_modules.join(".pnpm");
             let bin_dir = node_modules.join(".bin");
@@ -229,17 +375,27 @@ impl EnvironmentManager {
                 && vite_bin.exists()
                 && remotion_bin.exists()
                 // Sanity check: avoid "node_modules exists but is corrupt" cases.
-                && pnpm_workspace_has_package(std::path::Path::new(path), "vite")
-                && pnpm_workspace_has_package(std::path::Path::new(path), "picomatch");
+                && pnpm_workspace_has_package(ws_path, "vite")
+                && pnpm_workspace_has_package(ws_path, "picomatch");
             if deps_ok {
                 status.workspace_deps_valid = true;
             } else {
                 status.missing.push("workspace_deps".into());
             }
+            log_env_check_timing(
+                &self.toolchain_dir,
+                workspace_path,
+                &format!(
+                    "check_environment workspace_deps: {} ms (valid={})",
+                    deps_started.elapsed().as_millis(),
+                    status.workspace_deps_valid
+                ),
+            );
  
             // Check Skills: any <provider>/.*/skills/**/SKILL.md
-            let gemini_skills_dir = std::path::Path::new(path).join(".gemini").join("skills");
-            let opencode_skills_dir = std::path::Path::new(path).join(".opencode").join("skills");
+            let skills_started = Instant::now();
+            let gemini_skills_dir = ws_path.join(".gemini").join("skills");
+            let opencode_skills_dir = ws_path.join(".opencode").join("skills");
 
             let g_exists = has_any_skill_md(&gemini_skills_dir);
             let o_exists = has_any_skill_md(&opencode_skills_dir);
@@ -253,13 +409,128 @@ impl EnvironmentManager {
                 println!("  OpenCode dir: {:?} (Has SKILL.md: {})", opencode_skills_dir, o_exists);
                 status.missing.push("skills".into());
             }
+            log_env_check_timing(
+                &self.toolchain_dir,
+                workspace_path,
+                &format!(
+                    "check_environment skills: {} ms (valid={}, gemini_skill={}, opencode_skill={})",
+                    skills_started.elapsed().as_millis(),
+                    status.skills_valid,
+                    g_exists,
+                    o_exists
+                ),
+            );
         }
+
+        let missing = if status.missing.is_empty() {
+            "<none>".to_string()
+        } else {
+            status.missing.join(",")
+        };
+        log_env_check_timing(
+            &self.toolchain_dir,
+            workspace_path,
+            &format!(
+                "check_environment done: {} ms total (node={}, pnpm={}, provider_cli={}, workspace_deps={}, skills={}, missing={})",
+                total_started.elapsed().as_millis(),
+                status.node_valid,
+                status.pnpm_valid,
+                status.provider_cli_valid,
+                status.workspace_deps_valid,
+                status.skills_valid,
+                missing
+            ),
+        );
  
         status
     }
     
     fn is_local(&self, binary_name: &str) -> bool {
         self.get_bin_dir().join(binary_name).exists()
+    }
+
+    #[cfg(target_os = "windows")]
+    fn source_from_resolved_path(&self, resolved_path: &str) -> String {
+        let bin_dir = self
+            .get_bin_dir()
+            .to_string_lossy()
+            .to_string()
+            .to_ascii_lowercase()
+            .replace('/', "\\");
+        let p_norm = resolved_path
+            .to_ascii_lowercase()
+            .replace('/', "\\");
+        if p_norm.starts_with(&bin_dir) {
+            "local".to_string()
+        } else {
+            "system".to_string()
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn maybe_spawn_provider_cli_version_probe(&self, program: &str) {
+        if get_cached_provider_cli_version(program).is_some() {
+            return;
+        }
+
+        {
+            let mut in_flight = match provider_cli_probe_in_flight().lock() {
+                Ok(g) => g,
+                Err(e) => e.into_inner(),
+            };
+            if in_flight.contains(program) {
+                return;
+            }
+            in_flight.insert(program.to_string());
+        }
+
+        let bin_dir = self.get_bin_dir();
+        let program_name = program.to_string();
+        std::thread::spawn(move || {
+            let version = EnvironmentManager::probe_provider_cli_version_blocking(&bin_dir, &program_name)
+                .unwrap_or_default();
+            set_cached_provider_cli_version(&program_name, version);
+
+            let mut in_flight = match provider_cli_probe_in_flight().lock() {
+                Ok(g) => g,
+                Err(e) => e.into_inner(),
+            };
+            in_flight.remove(&program_name);
+        });
+    }
+
+    #[cfg(target_os = "windows")]
+    fn probe_provider_cli_version_blocking(bin_dir: &std::path::Path, program: &str) -> Option<String> {
+        let candidates: &[&[&str]] = &[
+            &["--version"],
+            &["version"],
+            &["--help"],
+            &["help"],
+        ];
+        let path_env = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{};{}", bin_dir.to_string_lossy(), path_env);
+
+        for args in candidates {
+            let mut cmd = Command::new("cmd");
+            cmd.arg("/C").arg(program).args(*args);
+            cmd.env("PATH", &new_path);
+            cmd.creation_flags(0x08000000);
+            let out = match cmd.output() {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if out.status.success() {
+                let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !stdout.is_empty() {
+                    return Some(stdout);
+                }
+                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                if !stderr.is_empty() {
+                    return Some(stderr);
+                }
+            }
+        }
+        Some("available".to_string())
     }
 
     fn check_command_any(&self, program: &str, candidates: &[&[&str]]) -> Result<String, String> {
@@ -295,24 +566,6 @@ impl EnvironmentManager {
 
     #[cfg(not(target_os = "windows"))]
     fn command_exists(&self, _program: &str) -> Option<String> {
-        None
-    }
-
-    #[cfg(target_os = "windows")]
-    fn detect_source_from_where(&self, program: &str) -> Option<String> {
-        let Some(p) = self.command_exists(program) else {
-            return None;
-        };
-        let bin_dir = self.get_bin_dir().to_string_lossy().to_string().to_ascii_lowercase();
-        let p_norm = p.to_ascii_lowercase();
-        if p_norm.starts_with(&bin_dir) {
-            return Some("local".to_string());
-        }
-        Some("system".to_string())
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    fn detect_source_from_where(&self, _program: &str) -> Option<String> {
         None
     }
 
@@ -422,6 +675,13 @@ pub async fn install_missing_dependencies(
         &provider,
         &workspace_path,
     );
+
+    // Missing-only policy: only run stages that are currently missing.
+    let env_manager = EnvironmentManager::new(app_dir.clone());
+    let initial = env_manager.check_environment(&provider, Some(&workspace_path));
+    let mut needs_toolchain = !(initial.node_valid && initial.pnpm_valid && initial.provider_cli_valid);
+    let mut needs_workspace_deps = !initial.workspace_deps_valid;
+    let mut needs_skills = !initial.skills_valid;
     
     // Simulate stages as per spec
     let stages = [
@@ -455,6 +715,15 @@ pub async fn install_missing_dependencies(
         );
 
         if step == "Bootstrapping workspace" {
+            if !needs_workspace_deps {
+                install_log::log_env_install(
+                    Some(&window),
+                    Some(&app_dir),
+                    Some(&ws_path),
+                    "Bootstrapping workspace: skipped (already ready).",
+                );
+                continue;
+            }
             // If node_modules already exists, we can skip pnpm install here.
             // This keeps “Install missing dep” fast when only skills are missing.
             let ws_path = std::path::PathBuf::from(&workspace_path);
@@ -489,6 +758,7 @@ pub async fn install_missing_dependencies(
                 let env_manager = EnvironmentManager::new(app_dir.clone());
                 run_pnpm_install(&window, &workspace_path, &env_manager).await?;
             }
+            needs_workspace_deps = false;
         }
 
         if step == "Installing baseline packages" {
@@ -517,6 +787,15 @@ pub async fn install_missing_dependencies(
         }
 
         if step == "Installing toolchain" {
+            if !needs_toolchain {
+                install_log::log_env_install(
+                    Some(&window),
+                    Some(&app_dir),
+                    Some(&ws_path),
+                    "Installing toolchain: skipped (already ready).",
+                );
+                continue;
+            }
             toolchain::ensure_local_toolchain(
                 Some(&window),
                 Some(&ws_path),
@@ -524,9 +803,19 @@ pub async fn install_missing_dependencies(
                 &window.app_handle(),
             )
             .await?;
+            needs_toolchain = false;
         }
 
         if step == "Installing Remotion skills" {
+            if !needs_skills {
+                install_log::log_env_install(
+                    Some(&window),
+                    Some(&app_dir),
+                    Some(&ws_path),
+                    "Installing Remotion skills: skipped (already ready).",
+                );
+                continue;
+            }
             let env_manager = EnvironmentManager::new(app_dir.clone());
             crate::skills::SkillsManager::install_remotion_skills(
                 Some(&window),
@@ -535,6 +824,7 @@ pub async fn install_missing_dependencies(
                 &env_manager,
             )
             .await?;
+            needs_skills = false;
         }
 
         tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
@@ -665,6 +955,15 @@ fn pnpm_workspace_has_package(ws_path: &std::path::Path, package: &str) -> bool 
     false
 }
 
+fn pnpm_install_outdated_lockfile(log_path: &std::path::Path) -> bool {
+    let text = match std::fs::read_to_string(log_path) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    text.contains("ERR_PNPM_OUTDATED_LOCKFILE")
+        || text.contains("Cannot install with \"frozen-lockfile\"")
+}
+
 fn baseline_signature(app_version: &str) -> String {
     let joined = BASELINE_NPM_PACKAGES
         .iter()
@@ -704,14 +1003,80 @@ pub fn get_baseline_packages_info(
     app_handle: tauri::AppHandle,
     workspace_path: String,
 ) -> Result<BaselinePackagesInfo, String> {
+    let total_started = Instant::now();
+    let app_data_dir = app_handle.path().app_local_data_dir().ok();
     let signature = baseline_signature(&app_handle.package_info().version.to_string());
     let ws_path = std::path::PathBuf::from(&workspace_path);
+
+    let ws_missing_started = Instant::now();
     let missing_in_workspace = missing_baseline_packages_for_dir(&ws_path)?;
+    install_log::log_env_check(
+        app_data_dir.as_deref(),
+        Some(ws_path.as_path()),
+        &format!(
+            "baseline_packages_info workspace scan: {} ms (missing={})",
+            ws_missing_started.elapsed().as_millis(),
+            missing_in_workspace.len()
+        ),
+    );
+    println!(
+        "[Epris][EnvCheck] baseline_packages_info workspace scan: {} ms (missing={})",
+        ws_missing_started.elapsed().as_millis(),
+        missing_in_workspace.len()
+    );
 
     let mut missing_in_template: Vec<String> = Vec::new();
-    if let Some(template_dir) = projects::get_mutable_template_dir(&app_handle)? {
+    let template_lookup_started = Instant::now();
+    let template_dir_opt = projects::get_mutable_template_dir(&app_handle)?;
+    install_log::log_env_check(
+        app_data_dir.as_deref(),
+        Some(ws_path.as_path()),
+        &format!(
+            "baseline_packages_info template resolve: {} ms (has_template={})",
+            template_lookup_started.elapsed().as_millis(),
+            template_dir_opt.is_some()
+        ),
+    );
+    println!(
+        "[Epris][EnvCheck] baseline_packages_info template resolve: {} ms (has_template={})",
+        template_lookup_started.elapsed().as_millis(),
+        template_dir_opt.is_some()
+    );
+    if let Some(template_dir) = template_dir_opt {
+        let template_missing_started = Instant::now();
         missing_in_template = missing_baseline_packages_for_dir(&template_dir)?;
+        install_log::log_env_check(
+            app_data_dir.as_deref(),
+            Some(ws_path.as_path()),
+            &format!(
+                "baseline_packages_info template scan: {} ms (missing={})",
+                template_missing_started.elapsed().as_millis(),
+                missing_in_template.len()
+            ),
+        );
+        println!(
+            "[Epris][EnvCheck] baseline_packages_info template scan: {} ms (missing={})",
+            template_missing_started.elapsed().as_millis(),
+            missing_in_template.len()
+        );
     }
+
+    install_log::log_env_check(
+        app_data_dir.as_deref(),
+        Some(ws_path.as_path()),
+        &format!(
+            "baseline_packages_info done: {} ms total (workspace_missing={}, template_missing={})",
+            total_started.elapsed().as_millis(),
+            missing_in_workspace.len(),
+            missing_in_template.len()
+        ),
+    );
+    println!(
+        "[Epris][EnvCheck] baseline_packages_info done: {} ms total (workspace_missing={}, template_missing={})",
+        total_started.elapsed().as_millis(),
+        missing_in_workspace.len(),
+        missing_in_template.len()
+    );
 
     Ok(BaselinePackagesInfo {
         signature,
@@ -1200,6 +1565,46 @@ async fn run_pnpm_install(
     }
 
     if !status.success() {
+        if pnpm_install_outdated_lockfile(&pnpm_log_path) {
+            install_log::log_env_install(
+                Some(window),
+                app_data_dir.as_deref(),
+                Some(&ws_path),
+                "pnpm install failed due to outdated lockfile; retrying once with --no-frozen-lockfile...",
+            );
+
+            let retry_out = crate::utils::create_async_shell_command(
+                "pnpm",
+                &[
+                    "install",
+                    "--no-frozen-lockfile",
+                    "--prefer-offline",
+                    "--store-dir",
+                    &store_dir_arg,
+                ],
+            )
+            .current_dir(workspace_path)
+            .env("PATH", &new_path)
+            .output()
+            .await
+            .map_err(|e| format!("Failed to spawn pnpm install (--no-frozen-lockfile retry): {}", e))?;
+
+            if let Ok(mut f) = pnpm_log.lock() {
+                let _ = writeln!(f, "[retry-nofrozen][stdout] {}", String::from_utf8_lossy(&retry_out.stdout));
+                let _ = writeln!(f, "[retry-nofrozen][stderr] {}", String::from_utf8_lossy(&retry_out.stderr));
+            }
+
+            if retry_out.status.success() {
+                install_log::log_env_install(
+                    Some(window),
+                    app_data_dir.as_deref(),
+                    Some(&ws_path),
+                    "pnpm install completed after --no-frozen-lockfile retry.",
+                );
+                return Ok(());
+            }
+        }
+
         // Best-effort: on Windows, we sometimes see `UNKNOWN: unknown error, open ...` with a
         // negative exit code, leaving a partially written node_modules. Repair once by removing
         // node_modules and retrying. We also repair if we had to kill a "Done but hung" pnpm and

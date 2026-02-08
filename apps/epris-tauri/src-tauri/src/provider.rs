@@ -1,16 +1,38 @@
-use serde::{Serialize, Deserialize};
-use std::process::{Child, Command};
-use std::path::{PathBuf};
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use tauri::Manager;
 use crate::environment::EnvironmentManager;
 use crate::utils;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+use std::path::PathBuf;
+use std::process::{Child, Command};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Mutex;
+use tauri::Manager;
 
 static PROVIDER_CLI_CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
 static PROVIDER_CLI_PID: AtomicU32 = AtomicU32::new(0);
+const NON_INTERACTIVE_NOTE: &str = "\n\
+                **Important:** The user cannot respond to questions or confirm plans in the middle of this run.\n\
+                Do **not** ask for confirmation or wait for replies; execute your plan end-to-end using tools (read/edit files, then verify).\n\n";
+const GUI_CONTEXT_NOTE: &str = "\n\
+                ## Epris App Context (Critical)\n\n\
+                - The user is in a GUI app, not in a terminal.\n\
+                - The user can only see preview, exposed handles/controls, Projects, and Settings.\n\
+                - The user cannot see CLI prompts, filesystem paths, command output, or approval dialogs.\n\
+                - Never stop mid-run to wait for user consent or clarification.\n\
+                - Complete the task end-to-end in one run unless a hard dependency is missing.\n\
+                - If a missing npm package is required, output a single `DEPENDENCY_REQUEST: <pkg>` line and stop.\n\n";
+const PLAN_TRACKING_NOTE: &str = "\n\
+                ## Plan Tracking (Required)\n\n\
+                - Before editing code, create or replace `.epris/agent/active-plan.md`.\n\
+                - Write a short Markdown checklist with concrete steps using `- [ ]` items.\n\
+                - Keep `active-plan.md` user-facing and structural only (elements/scenes/behaviors), without coding internals.\n\
+                - Keep technical implementation details in internal files under `.epris/agent/` (for example: `.epris/agent/task_plan.md`, `.epris/agent/progress.md`, `.epris/agent/findings.md`).\n\
+                - Execute strictly step-by-step.\n\
+                - After finishing each step, mark it as `- [x]` immediately.\n\
+                - Keep the file updated during the run so the GUI can show live progress.\n\
+                - Do not ask the user to approve this plan; execute autonomously.\n\n";
 
 fn kill_pid_tree(pid: u32) {
     if pid == 0 {
@@ -72,10 +94,10 @@ pub struct ProviderInfo {
 
 impl Default for ProviderState {
     fn default() -> Self {
-        Self { 
-            process: None, 
-            port: 4096, 
-            session_id: None, 
+        Self {
+            process: None,
+            port: 4096,
+            session_id: None,
             name: "opencode".into(),
             model: None,
             is_server: true,
@@ -87,6 +109,135 @@ impl Default for ProviderState {
 pub struct ProviderManager;
 
 impl ProviderManager {
+    fn ensure_gemini_settings(gemini_settings: &std::path::Path) -> Result<(), String> {
+        let mut settings = if gemini_settings.exists() {
+            std::fs::read_to_string(gemini_settings)
+                .ok()
+                .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+                .unwrap_or_else(|| json!({}))
+        } else {
+            json!({})
+        };
+
+        if !settings.is_object() {
+            settings = json!({});
+        }
+
+        let root = settings
+            .as_object_mut()
+            .ok_or_else(|| "Gemini settings root must be an object".to_string())?;
+
+        // Preserve existing model if present; otherwise set default.
+        let model = root.entry("model".to_string()).or_insert_with(|| json!({}));
+        if !model.is_object() {
+            *model = json!({});
+        }
+        if model.get("name").and_then(|v| v.as_str()).is_none() {
+            model["name"] = Value::String("gemini-3-flash-preview".to_string());
+        }
+
+        // Ensure REMOTION.md + package.json are always included in context files.
+        let context = root
+            .entry("context".to_string())
+            .or_insert_with(|| json!({}));
+        if !context.is_object() {
+            *context = json!({});
+        }
+        let file_name = context
+            .as_object_mut()
+            .expect("context is object")
+            .entry("fileName".to_string())
+            .or_insert_with(|| json!([]));
+        if !file_name.is_array() {
+            *file_name = json!([]);
+        }
+        let arr = file_name.as_array_mut().expect("fileName is array");
+        let mut has_remotion = false;
+        let mut has_package = false;
+        for item in arr.iter() {
+            if item.as_str() == Some("REMOTION.md") {
+                has_remotion = true;
+            }
+            if item.as_str() == Some("package.json") {
+                has_package = true;
+            }
+        }
+        if !has_remotion {
+            arr.push(Value::String("REMOTION.md".to_string()));
+        }
+        if !has_package {
+            arr.push(Value::String("package.json".to_string()));
+        }
+
+        // Keep skills enabled.
+        let experimental = root
+            .entry("experimental".to_string())
+            .or_insert_with(|| json!({}));
+        if !experimental.is_object() {
+            *experimental = json!({});
+        }
+        experimental["skills"] = Value::Bool(true);
+
+        // Enforce non-interactive autonomous execution for GUI users.
+        let tools = root.entry("tools".to_string()).or_insert_with(|| json!({}));
+        if !tools.is_object() {
+            *tools = json!({});
+        }
+        // Keep settings-compatible default. CLI still passes --approval-mode yolo.
+        // This avoids older settings schema silently falling back to read-only modes.
+        tools["approvalMode"] = Value::String("auto_edit".to_string());
+        tools["autoAccept"] = Value::Bool(true);
+
+        let content = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
+        std::fs::write(gemini_settings, content).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    fn ensure_opencode_config(opencode_config: &std::path::Path) -> Result<(), String> {
+        let mut config = if opencode_config.exists() {
+            std::fs::read_to_string(opencode_config)
+                .ok()
+                .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+                .unwrap_or_else(|| json!({}))
+        } else {
+            json!({})
+        };
+
+        if !config.is_object() {
+            config = json!({});
+        }
+        let root = config
+            .as_object_mut()
+            .ok_or_else(|| "OpenCode config root must be an object".to_string())?;
+        let instructions = root
+            .entry("instructions".to_string())
+            .or_insert_with(|| json!([]));
+        if !instructions.is_array() {
+            *instructions = json!([]);
+        }
+        let arr = instructions.as_array_mut().expect("instructions is array");
+        let mut has_remotion = false;
+        let mut has_package = false;
+        for item in arr.iter() {
+            if item.as_str() == Some("REMOTION.md") {
+                has_remotion = true;
+            }
+            if item.as_str() == Some("package.json") {
+                has_package = true;
+            }
+        }
+        if !has_remotion {
+            arr.push(Value::String("REMOTION.md".to_string()));
+        }
+        if !has_package {
+            arr.push(Value::String("package.json".to_string()));
+        }
+
+        let content = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+        std::fs::write(opencode_config, content).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     pub fn start(
         state: &mut ProviderState,
         workspace_path: &str,
@@ -106,9 +257,18 @@ impl ProviderManager {
         let port = utils::find_available_port(4096);
         let bin_dir = env_manager.get_bin_dir();
         let path_env = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{};{}", bin_dir.to_string_lossy(), path_env);
+        let path_sep = if cfg!(target_os = "windows") {
+            ';'
+        } else {
+            ':'
+        };
+        let new_path = format!("{}{}{}", bin_dir.to_string_lossy(), path_sep, path_env);
 
-        let prog = if provider_name == "gemini" { "gemini" } else { "opencode" };
+        let prog = if provider_name == "gemini" {
+            "gemini"
+        } else {
+            "opencode"
+        };
         let is_server = provider_name == "opencode";
         state.is_server = is_server;
 
@@ -134,29 +294,39 @@ impl ProviderManager {
 
         child_cmd.env("PATH", new_path);
         child_cmd.current_dir(workspace_path);
-        
-        child_cmd.arg("serve")
-                 .arg("--hostname").arg("127.0.0.1")
-                 .arg("--port").arg(&port.to_string())
-                 .arg("--print-logs")
-                 .arg("--log-level").arg("DEBUG");
+
+        child_cmd
+            .arg("serve")
+            .arg("--hostname")
+            .arg("127.0.0.1")
+            .arg("--port")
+            .arg(&port.to_string())
+            .arg("--print-logs")
+            .arg("--log-level")
+            .arg("DEBUG");
 
         // Redirect logs
         let logs_dir = std::path::Path::new(workspace_path).join("logs");
         let _ = std::fs::create_dir_all(&logs_dir);
         let log_file_path = logs_dir.join(format!("{}.log", provider_name));
-        
-        if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(&log_file_path) {
+
+        if let Ok(file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_file_path)
+        {
             child_cmd.stdout(file.try_clone().unwrap());
             child_cmd.stderr(file);
         }
 
-        let child = child_cmd.spawn().map_err(|e| format!("Failed to start provider {}: {}", provider_name, e))?;
-        
+        let child = child_cmd
+            .spawn()
+            .map_err(|e| format!("Failed to start provider {}: {}", provider_name, e))?;
+
         state.process = Some(child);
         state.port = port;
         state.name = provider_name.to_string();
-        
+
         Ok(port)
     }
 
@@ -167,9 +337,6 @@ impl ProviderManager {
         let opencode_dir = ws.join(".opencode");
         let gemini_settings = gemini_dir.join("settings.json");
         let opencode_config = opencode_dir.join("opencode.json");
-        let non_interactive_note = "\n\
-                **Important:** The user cannot respond to questions or confirm plans in the middle of this run.\n\
-                Do **not** ask for confirmation or wait for replies; execute your plan end-to-end using tools (read/edit files, then verify).\n\n";
 
         // Clean up legacy GEMINI.md if it exists
         let old_gemini_md = ws.join("GEMINI.md");
@@ -183,6 +350,22 @@ impl ProviderManager {
                 Enable fast, safe Remotion video generation for an initial version. Prioritize simplicity and successful rendering over architectural completeness.\n\n\
                 **Important:** The user cannot respond to questions or confirm plans in the middle of this run.\n\
                 Do **not** ask for confirmation or wait for replies; execute your plan end-to-end using tools (read/edit files, then verify).\n\n\
+                ## Epris App Context (Critical)\n\n\
+                - The user is in a GUI app, not in a terminal.\n\
+                - The user can only see preview, exposed handles/controls, Projects, and Settings.\n\
+                - The user cannot see CLI prompts, filesystem paths, command output, or approval dialogs.\n\
+                - Never stop mid-run to wait for user consent or clarification.\n\
+                - Complete the task end-to-end in one run unless a hard dependency is missing.\n\
+                - If a missing npm package is required, output a single `DEPENDENCY_REQUEST: <pkg>` line and stop.\n\n\
+                ## Plan Tracking (Required)\n\n\
+                - Before editing code, create or replace `.epris/agent/active-plan.md`.\n\
+                - Write a short Markdown checklist with concrete steps using `- [ ]` items.\n\
+                - Keep `active-plan.md` user-facing and structural only (elements/scenes/behaviors), without coding internals.\n\
+                - Keep technical implementation details in internal files under `.epris/agent/` (for example: `.epris/agent/task_plan.md`, `.epris/agent/progress.md`, `.epris/agent/findings.md`).\n\
+                - Execute strictly step-by-step.\n\
+                - After finishing each step, mark it as `- [x]` immediately.\n\
+                - Keep the file updated during the run so the GUI can show live progress.\n\
+                - Do not ask the user to approve this plan; execute autonomously.\n\n\
                 ## Dependency Policy (Important)\n\n\
                 - DO NOT install npm packages automatically.\n\
                 - DO NOT run pnpm/npm/yarn/bun.\n\
@@ -199,6 +382,7 @@ impl ProviderManager {
                   - `src/epris-controls.json` (control definitions)\n\
                   - `src/epris-props.json` (saved values, used for export)\n\
                 - If you add or change exposed props, update both files and ensure `src/Root.tsx` passes `defaultProps`.\n\
+                - In `epris-controls.json`, `ui` must match `type`: number->slider/input, color->color, select->select, boolean->toggle, text->text/textarea.\n\
                 - Optional: wrap major objects with `<EprisGroup id label kind>...</EprisGroup>` so the app can list them.\n\n\
                 ## 2. Entry Files\n\n\
                 ### `src/Root.tsx`\n\n\
@@ -232,17 +416,40 @@ impl ProviderManager {
         } else if let Ok(existing) = std::fs::read_to_string(&remotion_md) {
             // Keep this idempotent: only inject the note if it's missing.
             // This helps reduce "plan-only then exit" behavior for single-run CLIs.
-            let needs_note = !existing.contains("The user cannot respond to questions or confirm plans")
-                && !existing.contains("Do **not** ask for confirmation or wait for replies");
+            let mut normalized_existing = existing
+                .replace("`task_plan.md`", "`.epris/agent/task_plan.md`")
+                .replace("`progress.md`", "`.epris/agent/progress.md`")
+                .replace("`findings.md`", "`.epris/agent/findings.md`");
+
+            let needs_note = !normalized_existing
+                .contains("The user cannot respond to questions or confirm plans")
+                && !normalized_existing
+                    .contains("Do **not** ask for confirmation or wait for replies");
+            let needs_gui_context = !normalized_existing
+                .contains("## Epris App Context (Critical)")
+                && !normalized_existing.contains("The user is in a GUI app, not in a terminal.");
+            let needs_plan_tracking = !normalized_existing.contains("## Plan Tracking (Required)")
+                && !normalized_existing.contains("`.epris/agent/active-plan.md`");
+            let mut note_block = String::new();
             if needs_note {
-                let updated = if let Some(idx) = existing.find("## Dependency Policy") {
-                    let mut s = existing.clone();
-                    s.insert_str(idx, non_interactive_note);
-                    s
+                note_block.push_str(NON_INTERACTIVE_NOTE);
+            }
+            if needs_gui_context {
+                note_block.push_str(GUI_CONTEXT_NOTE);
+            }
+            if needs_plan_tracking {
+                note_block.push_str(PLAN_TRACKING_NOTE);
+            }
+            if !note_block.is_empty() {
+                if let Some(idx) = normalized_existing.find("## Dependency Policy") {
+                    normalized_existing.insert_str(idx, &note_block);
                 } else {
-                    format!("{}{}", non_interactive_note.trim_start(), existing)
-                };
-                let _ = std::fs::write(&remotion_md, updated);
+                    normalized_existing =
+                        format!("{}{}", note_block.trim_start(), normalized_existing);
+                }
+            }
+            if normalized_existing != existing {
+                let _ = std::fs::write(&remotion_md, normalized_existing);
             }
         }
 
@@ -254,39 +461,13 @@ impl ProviderManager {
             std::fs::create_dir_all(&opencode_dir).map_err(|e| e.to_string())?;
         }
 
-        // Gemini Official Config
-        if !gemini_settings.exists() {
-            let settings = serde_json::json!({
-                "model": {
-                    "name": "gemini-3-flash-preview"
-                },
-                "context": {
-                    "fileName": ["REMOTION.md", "package.json"]
-                },
-                "experimental": {
-                    "skills": true
-                },
-                "tools": {
-                    "approvalMode": "auto_edit",
-                    "autoAccept": false
-                }
-            });
-            let content = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
-            std::fs::write(&gemini_settings, content).map_err(|e| e.to_string())?;
-        }
-
-        // OpenCode Official Config
-        if !opencode_config.exists() {
-            let config = serde_json::json!({
-                "instructions": ["REMOTION.md", "package.json"]
-            });
-            let content = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
-            std::fs::write(&opencode_config, content).map_err(|e| e.to_string())?;
-        }
+        // Keep provider configs present and self-healed for older projects.
+        Self::ensure_gemini_settings(&gemini_settings)?;
+        Self::ensure_opencode_config(&opencode_config)?;
 
         Ok(())
     }
-    
+
     pub fn stop(state: &mut ProviderState) -> Result<(), String> {
         if let Some(mut child) = state.process.take() {
             utils::kill_process_tree(&mut child);
@@ -305,31 +486,64 @@ pub async fn run_provider_cli(
 ) -> Result<(), String> {
     PROVIDER_CLI_CANCEL_REQUESTED.store(false, Ordering::SeqCst);
     PROVIDER_CLI_PID.store(0, Ordering::SeqCst);
+    // Self-heal rule/config files on every run (important for legacy projects).
+    ProviderManager::ensure_rule_files(workspace_path)?;
 
     let env_manager = EnvironmentManager::new(app_data_dir.clone());
     let bin_dir = env_manager.get_bin_dir();
     let path_env = std::env::var("PATH").unwrap_or_default();
-    let new_path = format!("{};{}", bin_dir.to_string_lossy(), path_env);
+    let path_sep = if cfg!(target_os = "windows") {
+        ';'
+    } else {
+        ':'
+    };
+    let new_path = format!("{}{}{}", bin_dir.to_string_lossy(), path_sep, path_env);
 
-    // Context is now handled via settings.json for both Gemini and OpenCode
-    // We pass the raw prompt directly to avoid "Acknowledged" responses
-    let final_prompt = prompt.to_string();
+    // Context is now handled via settings.json for both Gemini and OpenCode.
+    // On Windows, arguments are routed through `cmd /C` for .cmd shims.
+    // Newlines in a single argument can truncate all following args in cmd parsing,
+    // so flatten prompt lines to keep flags and full content intact.
+    let final_prompt = if cfg!(target_os = "windows") {
+        prompt.replace("\r\n", "\n").replace('\n', " ")
+    } else {
+        prompt.to_string()
+    };
 
     let mut args = Vec::new();
-    args.push(final_prompt);
-    args.push("--approval-mode".to_string());
-    args.push("yolo".to_string());
-    
-    if let Some(mid) = model_id {
-        args.push("--model".to_string());
-        args.push(mid);
-    }
-    
-    args.push("--output-format".to_string());
-    args.push("json".to_string());
-    args.push("--debug".to_string());
+    if provider_name == "gemini" {
+        // Keep flags before prompt for reliable argument parsing.
+        args.push("--approval-mode".to_string());
+        args.push("yolo".to_string());
 
-    let prog = if provider_name == "gemini" { "gemini" } else { "opencode" };
+        if let Some(mid) = model_id {
+            args.push("--model".to_string());
+            args.push(mid);
+        }
+
+        args.push("--output-format".to_string());
+        args.push("json".to_string());
+        args.push("--debug".to_string());
+        args.push(final_prompt);
+    } else {
+        args.push(final_prompt);
+        args.push("--approval-mode".to_string());
+        args.push("yolo".to_string());
+
+        if let Some(mid) = model_id {
+            args.push("--model".to_string());
+            args.push(mid);
+        }
+
+        args.push("--output-format".to_string());
+        args.push("json".to_string());
+        args.push("--debug".to_string());
+    }
+
+    let prog = if provider_name == "gemini" {
+        "gemini"
+    } else {
+        "opencode"
+    };
     let mut cmd = {
         #[cfg(target_os = "windows")]
         {
@@ -346,7 +560,7 @@ pub async fn run_provider_cli(
 
     cmd.args(args);
     cmd.env("PATH", new_path);
-    
+
     // Use API Key from state if available
     let state_mgr = crate::state_manager::StateManager::new(app_data_dir);
     if let Some(key) = state_mgr.read().gemini_api_key {
@@ -356,8 +570,14 @@ pub async fn run_provider_cli(
     cmd.current_dir(workspace_path);
 
     // Redirect logs for CLI too
-    let log_file_path = std::path::Path::new(workspace_path).join("logs").join(format!("{}.log", provider_name));
-    if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(&log_file_path) {
+    let log_file_path = std::path::Path::new(workspace_path)
+        .join("logs")
+        .join(format!("{}.log", provider_name));
+    if let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_file_path)
+    {
         cmd.stdout(file.try_clone().unwrap());
         cmd.stderr(file);
     }
@@ -366,17 +586,26 @@ pub async fn run_provider_cli(
         return Err("Canceled".to_string());
     }
 
-    let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn CLI provider: {}", e))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to spawn CLI provider: {}", e))?;
     PROVIDER_CLI_PID.store(child.id(), Ordering::SeqCst);
 
-    let status = child.wait().map_err(|e| format!("Failed to wait CLI provider: {}", e))?;
+    let status = tokio::task::spawn_blocking(move || child.wait())
+        .await
+        .map_err(|e| format!("Failed to join CLI provider wait task: {}", e))?
+        .map_err(|e| format!("Failed to wait CLI provider: {}", e))?;
     PROVIDER_CLI_PID.store(0, Ordering::SeqCst);
 
     if !status.success() {
         if PROVIDER_CLI_CANCEL_REQUESTED.load(Ordering::SeqCst) {
             return Err("Canceled".to_string());
         }
-        return Err(format!("CLI provider {} failed with exit code {:?}", provider_name, status.code()));
+        return Err(format!(
+            "CLI provider {} failed with exit code {:?}",
+            provider_name,
+            status.code()
+        ));
     }
 
     Ok(())
@@ -389,11 +618,21 @@ pub async fn start_provider_cmd(
     workspace_path: String,
     provider: String,
 ) -> Result<u16, String> {
-    let app_dir = app_handle.path().app_local_data_dir().map_err(|e| e.to_string())?;
+    let app_dir = app_handle
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| e.to_string())?;
     let env_manager = EnvironmentManager::new(app_dir);
-    
+
     // Install Skills (Async, No lock)
-    if let Err(e) = crate::skills::SkillsManager::install_remotion_skills(None, &workspace_path, &provider, &env_manager).await {
+    if let Err(e) = crate::skills::SkillsManager::install_remotion_skills(
+        None,
+        &workspace_path,
+        &provider,
+        &env_manager,
+    )
+    .await
+    {
         println!("[Epris] Warning: Failed to install skills: {}", e);
     }
 

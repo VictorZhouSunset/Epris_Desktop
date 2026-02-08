@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { IpcService } from '../lib/ipc';
 
-import { PromptResponse } from '../types/backend';
+import { AgentPlanState, PromptResponse } from '../types/backend';
 
 export type PromptStatus = 'idle' | 'sending' | 'success' | 'error';
 
@@ -16,6 +16,13 @@ interface PromptProgress {
   step: string;
 }
 
+function normalizePathForCompare(path: string): string {
+  return path
+    .replace(/\\/g, '/')
+    .replace(/\/+$/g, '')
+    .toLowerCase();
+}
+
 export function usePrompt(
   workspacePath: string | undefined, 
   options?: UsePromptOptions,
@@ -27,23 +34,46 @@ export function usePrompt(
   const [currentStep, setCurrentStep] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
   const [lastResponse, setLastResponse] = useState<PromptResponse | null>(null);
+  const [planState, setPlanState] = useState<AgentPlanState | null>(null);
 
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
+    let unlistenProgress: (() => void) | undefined;
+    let unlistenPlan: (() => void) | undefined;
     
     const setupListener = async () => {
-      const unsub = await listen<PromptProgress>('prompt-progress', (event) => {
+      const unsubProgress = await listen<PromptProgress>('prompt-progress', (event) => {
         setProgress(event.payload.percent);
         setCurrentStep(event.payload.step);
       });
-      unlisten = unsub;
+      const unsubPlan = await listen<AgentPlanState>('agent-plan', (event) => {
+        const payload = event.payload;
+        if (!workspacePath) return;
+        const wsNorm = normalizePathForCompare(workspacePath);
+        const planPathNorm = normalizePathForCompare(payload?.path || '');
+        if (!planPathNorm) return;
+        if (!(planPathNorm === wsNorm || planPathNorm.startsWith(`${wsNorm}/`))) return;
+        setPlanState(payload);
+      });
+      unlistenProgress = unsubProgress;
+      unlistenPlan = unsubPlan;
     };
 
     setupListener();
     return () => {
-      if (unlisten) unlisten();
+      if (unlistenProgress) unlistenProgress();
+      if (unlistenPlan) unlistenPlan();
     };
-  }, []);
+  }, [workspacePath]);
+
+  useEffect(() => {
+    if (!workspacePath) {
+      setPlanState(null);
+      return;
+    }
+    IpcService.call<AgentPlanState>('GET_AGENT_PLAN_STATE', { workspacePath })
+      .then((state) => setPlanState(state))
+      .catch(() => {});
+  }, [workspacePath]);
 
   const sendPrompt = useCallback(async (prompt: string, providerOverride?: string, modelOverride?: string) => {
     if (!workspacePath) {
@@ -57,6 +87,9 @@ export function usePrompt(
     setProgress(0);
     setCurrentStep('Initializing AI...');
     setError(null);
+    IpcService.call<AgentPlanState>('GET_AGENT_PLAN_STATE', { workspacePath })
+      .then((state) => setPlanState(state))
+      .catch(() => {});
 
     try {
       const response = await IpcService.call<PromptResponse>('SEND_PROMPT', {
@@ -152,5 +185,5 @@ export function usePrompt(
     }
   }, [workspacePath, options]);
 
-  return { status, progress, currentStep, error, lastResponse, sendPrompt, clearSession, revalidateGate };
+  return { status, progress, currentStep, error, lastResponse, planState, sendPrompt, clearSession, revalidateGate };
 }

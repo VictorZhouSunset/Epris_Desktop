@@ -25,6 +25,9 @@ const PRESETS = [
   { id: '4:3', label: '4:3', w: 1440, h: 1080 },
 ];
 
+const formatDurationSecondsInput = (seconds: number): string =>
+  String(Math.max(1, Number(seconds.toFixed(2))));
+
 export function ParametersPanel({
   workspacePath,
   onApplied,
@@ -47,6 +50,7 @@ export function ParametersPanel({
   const [widthInput, setWidthInput] = useState<string>('1920');
   const [heightInput, setHeightInput] = useState<string>('1080');
   const [durationSecondsInput, setDurationSecondsInput] = useState<string>('5');
+  const [isDurationEditing, setIsDurationEditing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -80,7 +84,7 @@ export function ParametersPanel({
       setConfig(c);
       setWidthInput(String(c.width));
       setHeightInput(String(c.height));
-      setDurationSecondsInput(String(Math.max(1, Number(c.duration_seconds.toFixed(2)))));
+      setDurationSecondsInput(formatDurationSecondsInput(c.duration_seconds));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -91,6 +95,59 @@ export function ParametersPanel({
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Keep duration in sync with the real preview timeline length.
+  // Guardrails:
+  // - don't override while user is actively editing duration
+  // - don't override when user has local unsaved duration changes
+  useEffect(() => {
+    if (!workspacePath) return;
+    let active = true;
+
+    const poll = async () => {
+      if (busy) return;
+      try {
+        const next = await IpcService.call<VideoConfig>('GET_VIDEO_CONFIG', { workspacePath });
+        if (!active) return;
+
+        setConfig((prev) => {
+          if (
+            prev &&
+            prev.width === next.width &&
+            prev.height === next.height &&
+            prev.fps === next.fps &&
+            prev.duration_frames === next.duration_frames &&
+            Math.abs(prev.duration_seconds - next.duration_seconds) < 0.0001
+          ) {
+            return prev;
+          }
+          return next;
+        });
+
+        const currentTyped = Number.parseFloat(durationSecondsInput);
+        const hasLocalUnsavedDuration =
+          config !== null &&
+          Number.isFinite(currentTyped) &&
+          Math.abs(currentTyped - config.duration_seconds) > 0.01;
+
+        if (!isDurationEditing && !hasLocalUnsavedDuration) {
+          const nextInput = formatDurationSecondsInput(next.duration_seconds);
+          setDurationSecondsInput((prev) => (prev === nextInput ? prev : nextInput));
+        }
+      } catch {
+        // Quiet polling failure: avoid noisy UI while preview/environment is restarting.
+      }
+    };
+
+    const timer = setInterval(() => {
+      void poll();
+    }, 1200);
+
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, [workspacePath, busy, isDurationEditing, durationSecondsInput, config]);
 
   const activePresetId = useMemo(() => {
     if (!Number.isFinite(width) || !Number.isFinite(height)) return null;
@@ -114,7 +171,7 @@ export function ParametersPanel({
       setConfig(updated);
       setWidthInput(String(updated.width));
       setHeightInput(String(updated.height));
-      setDurationSecondsInput(String(Math.max(1, Number(updated.duration_seconds.toFixed(2)))));
+      setDurationSecondsInput(formatDurationSecondsInput(updated.duration_seconds));
       onApplied();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -159,7 +216,6 @@ export function ParametersPanel({
       if (res.success && !res.canceled) {
         setUiAgentPrompt('');
       }
-      await uiPropsActions.reload();
       onScanObjects();
       onApplied();
     } catch (e) {
@@ -167,7 +223,7 @@ export function ParametersPanel({
     } finally {
       setUiAgentBusy(false);
     }
-  }, [uiAgentPrompt, workspacePath, provider, model, uiPropsState.draftValues, uiPropsActions, onScanObjects, onApplied]);
+  }, [uiAgentPrompt, workspacePath, provider, model, uiPropsState.draftValues, onScanObjects, onApplied]);
 
   const controls = uiPropsState.controlsSpec?.controls ?? [];
 
@@ -269,6 +325,7 @@ export function ParametersPanel({
             key={c.id}
             label={c.label}
             value={s}
+            ui={c.ui}
             placeholder={c.placeholder}
             onChange={(next) => uiPropsActions.setDraftValue(c.id, next)}
             disabled={uiPropsState.loading}
@@ -344,14 +401,17 @@ export function ParametersPanel({
                 step={0.1}
                 value={durationSecondsInput}
                 onChange={(e) => setDurationSecondsInput(e.target.value)}
+                onFocus={() => setIsDurationEditing(true)}
                 onKeyDown={handleKeyDownApply}
                 onBlur={() => {
                   if (durationSecondsInput.trim() === '') {
                     setDurationSecondsInput('1');
+                    setIsDurationEditing(false);
                     return;
                   }
                   const v = Number.parseFloat(durationSecondsInput);
                   if (!Number.isFinite(v) || v <= 0) setDurationSecondsInput('1');
+                  setIsDurationEditing(false);
                 }}
                 className="w-full bg-slate-950 border border-slate-700 rounded-xl px-2 py-2 text-sm text-white outline-none focus:border-indigo-500 transition-colors"
                 disabled={busy}

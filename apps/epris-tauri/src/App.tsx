@@ -1,4 +1,6 @@
 import {
+  ChevronDown,
+  ChevronUp,
   Clock,
   Download,
   FolderOpen,
@@ -22,6 +24,7 @@ import { AssetsModal } from './components/AssetsModal';
 import { FirstRunWizard } from './components/FirstRunWizard';
 import { ParametersPanel } from './components/ParametersPanel';
 import { ProjectsPanel } from './components/ProjectsPanel';
+import { SaveSnapshotModal } from './components/SaveSnapshotModal';
 import { Settings } from './components/Settings';
 import { SnapshotHistory } from './components/SnapshotHistory';
 import { WelcomePage } from './components/WelcomePage';
@@ -36,6 +39,66 @@ import { useWaitPort } from './hooks/useWaitPort';
 import type { SttStatus } from './types/backend';
 import { IpcService } from './lib/ipc';
 
+type ProviderId = 'opencode' | 'gemini';
+
+type ProjectProviderPreference = {
+  provider: ProviderId;
+  model: string;
+  updated_at: number;
+};
+
+const PROJECT_PROVIDER_PREFS_KEY = 'epris:project-provider-prefs:v1';
+const DEFAULT_PROVIDER: ProviderId = 'opencode';
+const DEFAULT_MODEL_BY_PROVIDER: Record<ProviderId, string> = {
+  opencode: 'opencode/big-pickle',
+  gemini: 'gemini-3-flash-preview',
+};
+const MODELS: Record<ProviderId, Array<{ id: string; name: string }>> = {
+  opencode: [
+    { id: 'opencode/big-pickle', name: 'Big Pickle (Default)' },
+    { id: 'opencode/minimax-m2.1-free', name: 'MiniMax M2.1' },
+  ],
+  gemini: [
+    { id: 'gemini-3-flash-preview', name: 'Gemini 3.0 Flash Preview' },
+    { id: 'gemini-3-pro-preview', name: 'Gemini 3.0 Pro Preview' },
+    { id: 'gemini-2.0-flash-exp', name: 'Gemini 2.0 Flash Exp' },
+    { id: 'gemini-1.5-pro', name: 'Gemini 1.5 Pro' },
+    { id: 'gemini-1.5-flash', name: 'Gemini 1.5 Flash' },
+  ],
+};
+
+function normalizeProvider(value: string | null | undefined): ProviderId {
+  return value === 'gemini' ? 'gemini' : 'opencode';
+}
+
+function readProjectProviderPrefs(): Record<string, ProjectProviderPreference> {
+  try {
+    const raw = localStorage.getItem(PROJECT_PROVIDER_PREFS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return {};
+    const result: Record<string, ProjectProviderPreference> = {};
+    for (const [projectId, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (!value || typeof value !== 'object') continue;
+      const obj = value as Record<string, unknown>;
+      const provider = normalizeProvider(typeof obj.provider === 'string' ? obj.provider : null);
+      const model = typeof obj.model === 'string' && obj.model ? obj.model : DEFAULT_MODEL_BY_PROVIDER[provider];
+      const updatedAtRaw = obj.updated_at;
+      const updated_at = typeof updatedAtRaw === 'number' ? updatedAtRaw : Date.now();
+      result[projectId] = { provider, model, updated_at };
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+function writeProjectProviderPrefs(prefs: Record<string, ProjectProviderPreference>) {
+  try {
+    localStorage.setItem(PROJECT_PROVIDER_PREFS_KEY, JSON.stringify(prefs));
+  } catch {}
+}
+
 function App() {
   const [promptInput, setPromptInput] = useState('');
   const [iframeKey, setIframeKey] = useState(0);
@@ -49,12 +112,19 @@ function App() {
   const [showWizard, setShowWizard] = useState(false);
   const [wizardDismissed, setWizardDismissed] = useState(false);
   const [isEnvReady, setIsEnvReady] = useState(false);
+  const [isDeletingProject, setIsDeletingProject] = useState(false);
+  const [deletingProjectName, setDeletingProjectName] = useState('');
   const [linkingDeps, setLinkingDeps] = useState(false);
   const [linkingProgress, setLinkingProgress] = useState<{ step: string; percent: number } | null>(null);
   const linkingForWorkspaceRef = useRef<string>('');
+  const autoLinkingInFlightRef = useRef<boolean>(false);
   const baselinePromptedSignatureRef = useRef<string>('');
 
   const [showCreateProject, setShowCreateProject] = useState(false);
+  const [showSaveSnapshotModal, setShowSaveSnapshotModal] = useState(false);
+  const [saveSnapshotDefaultName, setSaveSnapshotDefaultName] = useState('');
+  const [saveSnapshotError, setSaveSnapshotError] = useState<string | null>(null);
+  const [isSaveSnapshotBusy, setIsSaveSnapshotBusy] = useState(false);
   const [defaultProjectsRoot, setDefaultProjectsRoot] = useState('');
   const [isProjectsPanelOpen, setIsProjectsPanelOpen] = useState(() => {
     try {
@@ -70,6 +140,13 @@ function App() {
       return true;
     }
   });
+  const [isPlanPanelCollapsed, setIsPlanPanelCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem('epris:planPanelCollapsed') === '1';
+    } catch {
+      return false;
+    }
+  });
 
   const [sttStatus, setSttStatus] = useState<SttStatus | null>(null);
   const [isRecording, setIsRecording] = useState(false);
@@ -80,19 +157,55 @@ function App() {
   const [model, setModel] = useState('opencode/big-pickle');
   const [showModelMenu, setShowModelMenu] = useState(false);
 
-  const MODELS = {
-    opencode: [
-      { id: 'opencode/big-pickle', name: 'Big Pickle (Default)' },
-      { id: 'opencode/minimax-m2.1-free', name: 'MiniMax M2.1' },
-    ],
-    gemini: [
-      { id: 'gemini-3-flash-preview', name: 'Gemini 3.0 Flash Preview' },
-      { id: 'gemini-3-pro-preview', name: 'Gemini 3.0 Pro Preview' },
-      { id: 'gemini-2.0-flash-exp', name: 'Gemini 2.0 Flash Exp' },
-      { id: 'gemini-1.5-pro', name: 'Gemini 1.5 Pro' },
-      { id: 'gemini-1.5-flash', name: 'Gemini 1.5 Flash' },
-    ],
-  };
+  const projectProviderPrefsRef = useRef<Record<string, ProjectProviderPreference>>(readProjectProviderPrefs());
+  const pendingNewProjectSelectionRef = useRef<{ provider: ProviderId; model: string } | null>(null);
+
+  const resolveModelForProvider = useCallback(
+    (providerInput: string, preferredModel?: string) => {
+      const providerId = normalizeProvider(providerInput);
+      const options = MODELS[providerId] || [];
+      if (preferredModel && options.some((m) => m.id === preferredModel)) return preferredModel;
+      return DEFAULT_MODEL_BY_PROVIDER[providerId];
+    },
+    [],
+  );
+
+  const rememberProjectProviderSelection = useCallback(
+    (projectId: string, providerInput: string, preferredModel?: string) => {
+      const providerId = normalizeProvider(providerInput);
+      const modelId = resolveModelForProvider(providerId, preferredModel);
+      const next: Record<string, ProjectProviderPreference> = {
+        ...projectProviderPrefsRef.current,
+        [projectId]: {
+          provider: providerId,
+          model: modelId,
+          updated_at: Date.now(),
+        },
+      };
+      projectProviderPrefsRef.current = next;
+      writeProjectProviderPrefs(next);
+      return { provider: providerId, model: modelId };
+    },
+    [resolveModelForProvider],
+  );
+
+  const getProjectProviderSelection = useCallback(
+    (projectId: string): { provider: ProviderId; model: string } | null => {
+      const pref = projectProviderPrefsRef.current[projectId];
+      if (!pref) return null;
+      const providerId = normalizeProvider(pref.provider);
+      return { provider: providerId, model: resolveModelForProvider(providerId, pref.model) };
+    },
+    [resolveModelForProvider],
+  );
+
+  const forgetProjectProviderSelection = useCallback((projectId: string) => {
+    if (!projectProviderPrefsRef.current[projectId]) return;
+    const next: Record<string, ProjectProviderPreference> = { ...projectProviderPrefsRef.current };
+    delete next[projectId];
+    projectProviderPrefsRef.current = next;
+    writeProjectProviderPrefs(next);
+  }, []);
 
   const {
     overview,
@@ -105,6 +218,19 @@ function App() {
     pickProjectsRoot,
   } = useProjects();
   const workspacePath = activeProject?.path;
+
+  const getSelectionForNewProject = useCallback((): { provider: ProviderId; model: string } => {
+    if (!activeProject?.id) {
+      return {
+        provider: DEFAULT_PROVIDER,
+        model: DEFAULT_MODEL_BY_PROVIDER[DEFAULT_PROVIDER],
+      };
+    }
+    const remembered = getProjectProviderSelection(activeProject.id);
+    if (remembered) return remembered;
+    const providerId = normalizeProvider(provider);
+    return { provider: providerId, model: resolveModelForProvider(providerId, model) };
+  }, [activeProject?.id, getProjectProviderSelection, model, provider, resolveModelForProvider]);
 
   const micButtonRef = useRef<HTMLButtonElement | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -134,7 +260,9 @@ function App() {
     [postToPreview],
   );
 
-  const requestObjectsScan = useCallback(() => {
+  const uiProps = useUiProps(workspacePath, { sendToPreview: sendInputPropsToPreview });
+
+  const requestObjectsScan = useCallback((options?: { reloadUiProps?: boolean }) => {
     if (!workspacePath) return;
     // Backend fallback: works even if the workspace Preview.tsx doesn't support scan yet.
     IpcService.call<any[]>('SCAN_EPRIS_OBJECTS', { workspacePath })
@@ -145,7 +273,12 @@ function App() {
 
     // Runtime scan (preferred when supported).
     postToPreview({ type: 'epris:getObjectsSnapshot' });
-  }, [postToPreview, workspacePath]);
+    if (options?.reloadUiProps) {
+      void uiProps.actions.reload().catch((e) => {
+        console.error('Failed to reload controls/props after object scan:', e);
+      });
+    }
+  }, [postToPreview, uiProps.actions, workspacePath]);
 
   // Preview -> App postMessage bridge (handshake + scan results)
   useEffect(() => {
@@ -155,7 +288,7 @@ function App() {
 
       if (data.type === 'epris:ready') {
         sendInputPropsToPreview(uiDraftValuesRef.current || {});
-        requestObjectsScan();
+        requestObjectsScan({ reloadUiProps: true });
         return;
       }
 
@@ -194,6 +327,7 @@ function App() {
     currentStep: promptCurrentStep,
     error: promptError,
     lastResponse,
+    planState,
     sendPrompt,
     clearSession,
     revalidateGate,
@@ -426,8 +560,6 @@ function App() {
   } = useExport(workspacePath);
   const { getHead, checkUnsavedChanges, manualSaveSnapshot } = useSnapshot(workspacePath);
 
-  const uiProps = useUiProps(workspacePath, { sendToPreview: sendInputPropsToPreview });
-
   useEffect(() => {
     uiDraftValuesRef.current = uiProps.state.draftValues;
   }, [uiProps.state.draftValues]);
@@ -530,6 +662,7 @@ function App() {
           setShowWizard(false);
           if (linkingForWorkspaceRef.current !== workspacePath) {
             linkingForWorkspaceRef.current = workspacePath;
+            autoLinkingInFlightRef.current = true;
             setLinkingDeps(true);
             setLinkingProgress({ step: 'Linking dependencies', percent: 0 });
             try {
@@ -540,6 +673,7 @@ function App() {
               console.error('Failed to link deps:', e);
               setShowWizard(true);
             } finally {
+              autoLinkingInFlightRef.current = false;
               setLinkingDeps(false);
             }
           }
@@ -547,6 +681,9 @@ function App() {
         }
 
         setIsEnvReady(false);
+        if (autoLinkingInFlightRef.current) {
+          return;
+        }
         if (wizardDismissed) {
           setShowWizard(false);
         } else {
@@ -562,7 +699,7 @@ function App() {
     };
   }, [workspacePath, provider, wizardDismissed, showWizard]);
 
-  // Step 13: default provider when opening a project
+  // Provider/model selection follows project-level remembered preference.
   useEffect(() => {
     setIsEnvReady(false);
     setShowWizard(false);
@@ -570,10 +707,30 @@ function App() {
     setLinkingDeps(false);
     setLinkingProgress(null);
     linkingForWorkspaceRef.current = '';
-    if (!workspacePath) return;
-    setProvider('opencode');
-    setModel('opencode/big-pickle');
-  }, [workspacePath]);
+    if (!workspacePath || !activeProject?.id) return;
+
+    let nextSelection = getProjectProviderSelection(activeProject.id);
+    if (!nextSelection && pendingNewProjectSelectionRef.current) {
+      nextSelection = pendingNewProjectSelectionRef.current;
+      rememberProjectProviderSelection(activeProject.id, nextSelection.provider, nextSelection.model);
+      pendingNewProjectSelectionRef.current = null;
+    }
+    if (!nextSelection) {
+      nextSelection = {
+        provider: DEFAULT_PROVIDER,
+        model: resolveModelForProvider(DEFAULT_PROVIDER),
+      };
+    }
+
+    setProvider(nextSelection.provider);
+    setModel(nextSelection.model);
+  }, [
+    activeProject?.id,
+    getProjectProviderSelection,
+    rememberProjectProviderSelection,
+    resolveModelForProvider,
+    workspacePath,
+  ]);
 
   useEffect(() => {
     try {
@@ -586,6 +743,12 @@ function App() {
       localStorage.setItem('epris:parametersPanelOpen', isParametersPanelOpen ? '1' : '0');
     } catch {}
   }, [isParametersPanelOpen]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('epris:planPanelCollapsed', isPlanPanelCollapsed ? '1' : '0');
+    } catch {}
+  }, [isPlanPanelCollapsed]);
 
   // Track env install progress even when wizard isn't shown (e.g. linking deps).
   useEffect(() => {
@@ -601,32 +764,54 @@ function App() {
     };
   }, []);
 
-  const handleProviderChange = useCallback((newProvider: string) => {
-    setProvider(newProvider);
-    if (newProvider === 'gemini') setModel('gemini-3-flash-preview');
-    else setModel('opencode/big-pickle');
-  }, []);
+  const handleProviderChange = useCallback(
+    (newProvider: string) => {
+      const nextProvider = normalizeProvider(newProvider);
+      const nextModel = resolveModelForProvider(nextProvider);
+      setProvider(nextProvider);
+      setModel(nextModel);
+      if (activeProject?.id) {
+        rememberProjectProviderSelection(activeProject.id, nextProvider, nextModel);
+      }
+    },
+    [activeProject?.id, rememberProjectProviderSelection, resolveModelForProvider],
+  );
 
-  const handleManualSave = useCallback(async () => {
+  const handleManualSave = useCallback(() => {
     if (!workspacePath) return;
-    const name = prompt('Enter snapshot name:', `Manual ${new Date().toLocaleTimeString()}`);
-    if (!name) return;
-    const desc = prompt('Enter description (optional):', '');
-    try {
-      await uiProps.actions.saveIfDirty();
-      const currentHead = await getHead();
-      await manualSaveSnapshot(name, desc || '', currentHead);
-    } catch (err) {
-      alert('Save failed: ' + (err instanceof Error ? err.message : String(err)));
-    }
-  }, [workspacePath, manualSaveSnapshot, getHead, uiProps.actions.saveIfDirty]);
+    setSaveSnapshotDefaultName(`Manual ${new Date().toLocaleTimeString()}`);
+    setSaveSnapshotError(null);
+    setShowSaveSnapshotModal(true);
+  }, [workspacePath]);
+
+  const handleSaveSnapshotModalSubmit = useCallback(
+    async (name: string, description: string) => {
+      if (!workspacePath) return;
+      try {
+        setIsSaveSnapshotBusy(true);
+        setSaveSnapshotError(null);
+        await uiProps.actions.saveIfDirty();
+        const currentHead = await getHead();
+        await manualSaveSnapshot(name, description, currentHead);
+        setShowSaveSnapshotModal(false);
+      } catch (err) {
+        setSaveSnapshotError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setIsSaveSnapshotBusy(false);
+      }
+    },
+    [workspacePath, uiProps.actions, getHead, manualSaveSnapshot],
+  );
 
   const handleSubmit = useCallback(async () => {
     if (!promptInput.trim()) return;
     const currentPrompt = promptInput;
+    if (activeProject?.id) {
+      rememberProjectProviderSelection(activeProject.id, provider, model);
+    }
     setPromptInput('');
     await sendPrompt(currentPrompt, provider, model);
-  }, [promptInput, sendPrompt, provider, model]);
+  }, [activeProject?.id, model, promptInput, provider, rememberProjectProviderSelection, sendPrompt]);
 
   const handleExport = useCallback(async () => {
     try {
@@ -650,10 +835,15 @@ function App() {
   const handleCreateProjectClick = useCallback(async () => {
     // Only ask for ProjectsRoot the first time.
     if (overview?.projects_root) {
+      const seedSelection = getSelectionForNewProject();
+      pendingNewProjectSelectionRef.current = seedSelection;
       try {
-        await createProject(undefined, undefined);
+        const created = await createProject(undefined, undefined);
+        rememberProjectProviderSelection(created.id, seedSelection.provider, seedSelection.model);
       } catch (e) {
         alert('Failed to create project: ' + (e instanceof Error ? e.message : String(e)));
+      } finally {
+        pendingNewProjectSelectionRef.current = null;
       }
       return;
     }
@@ -666,7 +856,13 @@ function App() {
     } finally {
       setShowCreateProject(true);
     }
-  }, [createProject, getDefaultProjectsRoot, overview?.projects_root]);
+  }, [
+    createProject,
+    getDefaultProjectsRoot,
+    getSelectionForNewProject,
+    overview?.projects_root,
+    rememberProjectProviderSelection,
+  ]);
 
   const handleSelectProject = useCallback(
     async (projectId: string) => {
@@ -698,6 +894,7 @@ function App() {
 
   const handleDeleteProject = useCallback(
     async (projectId: string) => {
+      if (isDeletingProject) return;
       const target = overview?.projects.find((p) => p.id === projectId);
       if (!target) return;
       if (
@@ -708,30 +905,38 @@ function App() {
         return;
       }
 
-      if (projectId === overview?.active_project_id) {
-        try {
-          if (workspacePath) {
-            await invoke('auto_save_checkpoint', {
-              workspacePath,
-              reason: 'Before deleting project',
-              force: true,
-            });
-          }
-        } catch {}
-        try {
-          await invoke('stop_gate_validation');
-        } catch {}
-        try {
-          await invoke('stop_preview_server');
-        } catch {}
-        try {
-          await invoke('stop_opencode');
-        } catch {}
+      setIsDeletingProject(true);
+      setDeletingProjectName(target.name);
+      try {
+        if (projectId === overview?.active_project_id) {
+          try {
+            if (workspacePath) {
+              await invoke('auto_save_checkpoint', {
+                workspacePath,
+                reason: 'Before deleting project',
+                force: true,
+              });
+            }
+          } catch {}
+          try {
+            await invoke('stop_gate_validation');
+          } catch {}
+          try {
+            await invoke('stop_preview_server');
+          } catch {}
+          try {
+            await invoke('stop_opencode');
+          } catch {}
+        }
+        await deleteProject(projectId);
+        forgetProjectProviderSelection(projectId);
+        setIframeKey((k) => k + 1);
+      } finally {
+        setIsDeletingProject(false);
+        setDeletingProjectName('');
       }
-      await deleteProject(projectId);
-      setIframeKey((k) => k + 1);
     },
-    [deleteProject, overview],
+    [deleteProject, forgetProjectProviderSelection, isDeletingProject, overview, workspacePath],
   );
 
   const handleRenameProject = useCallback(
@@ -749,6 +954,14 @@ function App() {
   const isProcessing = promptStatus === 'sending';
   const hasGateError = promptStatus === 'error';
   const gateFailed = Boolean(lastResponse?.gate_result && !lastResponse.gate_result.passed);
+  const planProgressPct = useMemo(() => {
+    if (!planState || planState.total <= 0) return 0;
+    return Math.round((planState.completed / planState.total) * 100);
+  }, [planState]);
+  const showPlanPanel = Boolean(workspacePath) && (
+    isProcessing ||
+    Boolean(planState && (planState.exists || planState.total > 0))
+  );
 
   const missingPackages = useMemo(() => {
     const err = lastResponse?.gate_result?.error_output || lastResponse?.gate_result?.error || '';
@@ -1212,6 +1425,9 @@ function App() {
                               key={m.id}
                               onClick={() => {
                                 setModel(m.id);
+                                if (activeProject?.id) {
+                                  rememberProjectProviderSelection(activeProject.id, provider, m.id);
+                                }
                                 setShowModelMenu(false);
                               }}
                               className={`w-full text-left px-4 py-3 text-sm hover:bg-slate-800 transition-colors flex items-center justify-between ${
@@ -1325,6 +1541,68 @@ function App() {
                   </p>
                 )}
 
+                {showPlanPanel && (
+                  <div className="mx-2 rounded-2xl border border-slate-700 bg-slate-800/60 shadow-xl overflow-hidden">
+                    <div
+                      className={`px-4 py-3 flex items-center justify-between gap-3 ${
+                        isPlanPanelCollapsed ? '' : 'border-b border-slate-700/80'
+                      }`}
+                    >
+                      <div className="min-w-0">
+                        <div className="text-[11px] uppercase tracking-widest text-slate-400 font-black">Agent Plan</div>
+                        <div className="text-xs text-slate-500 truncate">
+                          {planState?.path || (workspacePath ? `${workspacePath}/.epris/agent/active-plan.md` : '.epris/agent/active-plan.md')}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <div className="text-xs font-black tabular-nums text-slate-300">
+                          {planState ? `${planState.completed}/${planState.total}` : '0/0'}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setIsPlanPanelCollapsed((v) => !v)}
+                          className="p-1.5 rounded-lg border border-slate-700 text-slate-300 hover:text-white hover:bg-slate-700/70 transition-colors"
+                          title={isPlanPanelCollapsed ? 'Expand Agent Plan' : 'Collapse Agent Plan'}
+                          aria-label={isPlanPanelCollapsed ? 'Expand Agent Plan' : 'Collapse Agent Plan'}
+                        >
+                          {isPlanPanelCollapsed ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
+                        </button>
+                      </div>
+                    </div>
+
+                    {!isPlanPanelCollapsed && (
+                      <>
+                        <div className="px-4 pt-3">
+                          <div className="h-1.5 rounded-full bg-slate-900/80 border border-slate-700 overflow-hidden">
+                            <div
+                              className="h-full bg-emerald-500 transition-all duration-500 ease-out"
+                              style={{ width: `${planProgressPct}%` }}
+                            />
+                          </div>
+                        </div>
+
+                        <div className="px-4 py-3 space-y-2 max-h-48 overflow-y-auto">
+                          {planState?.steps?.length ? (
+                            planState.steps.map((step, idx) => (
+                              <div
+                                key={`${idx}-${step.title}`}
+                                className={`flex items-start gap-2 text-sm ${step.done ? 'text-emerald-300' : 'text-slate-300'}`}
+                              >
+                                <span className="text-xs font-black mt-0.5">{step.done ? 'x' : 'o'}</span>
+                                <span className={step.done ? 'line-through decoration-emerald-400/70' : ''}>{step.title}</span>
+                              </div>
+                            ))
+                          ) : (
+                            <div className="text-sm text-slate-400">
+                              Waiting for agent to write checklist steps...
+                            </div>
+                          )}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
+
                 <p className="px-4 text-sm text-slate-500">
                   {isReady ? 'Press Enter or click send to generate code with AI.' : 'Waiting for preview server and OpenCode to start...'}
                 </p>
@@ -1343,7 +1621,7 @@ function App() {
             uiPropsState={uiProps.state}
             uiPropsActions={uiProps.actions}
             objectsSnapshot={objectsSnapshot}
-            onScanObjects={requestObjectsScan}
+            onScanObjects={() => requestObjectsScan({ reloadUiProps: true })}
           />
         )}
         {workspacePath && !isParametersPanelOpen && (
@@ -1366,6 +1644,21 @@ function App() {
           hasUnsavedChanges={hasUnsavedChanges}
         />
       )}
+
+      <SaveSnapshotModal
+        isOpen={showSaveSnapshotModal}
+        title="Save Current Version"
+        defaultName={saveSnapshotDefaultName}
+        defaultDescription=""
+        busy={isSaveSnapshotBusy}
+        error={saveSnapshotError}
+        onClose={() => {
+          if (isSaveSnapshotBusy) return;
+          setShowSaveSnapshotModal(false);
+          setSaveSnapshotError(null);
+        }}
+        onSubmit={handleSaveSnapshotModalSubmit}
+      />
 
       {/* Settings Modal */}
       {showSettings && (
@@ -1391,11 +1684,6 @@ function App() {
         <FirstRunWizard
           workspacePath={workspacePath}
           provider={provider}
-          onComplete={() => {
-            setShowWizard(false);
-            setWizardDismissed(false);
-            setIsEnvReady(true);
-          }}
           onClose={() => {
             setShowWizard(false);
             setWizardDismissed(true);
@@ -1411,8 +1699,15 @@ function App() {
           initialRoot={overview?.projects_root}
           onPickRoot={(initial) => pickProjectsRoot(initial || undefined)}
           onCreate={async (root, name) => {
-            await createProject(root, name);
-            setShowCreateProject(false);
+            const seedSelection = getSelectionForNewProject();
+            pendingNewProjectSelectionRef.current = seedSelection;
+            try {
+              const created = await createProject(root, name);
+              rememberProjectProviderSelection(created.id, seedSelection.provider, seedSelection.model);
+              setShowCreateProject(false);
+            } finally {
+              pendingNewProjectSelectionRef.current = null;
+            }
           }}
           onClose={() => setShowCreateProject(false)}
         />
@@ -1480,6 +1775,28 @@ function App() {
                 {isInstallingMissingPackages ? 'Installing…' : 'Install dependencies'}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {isDeletingProject && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-slate-950/55 backdrop-blur-sm">
+          <div className="w-full max-w-md mx-4 rounded-2xl border border-slate-700 bg-slate-900/95 shadow-2xl p-6">
+            <div className="flex items-center gap-3">
+              <RefreshCw size={18} className="animate-spin text-indigo-400" />
+              <div>
+                <div className="text-sm font-black uppercase tracking-widest text-indigo-300">
+                  Safe Delete
+                </div>
+                <div className="text-lg font-semibold text-slate-100 mt-1">
+                  Safely deleting project...
+                </div>
+              </div>
+            </div>
+            <p className="mt-4 text-sm text-slate-300">
+              Please wait. Epris is stopping services and removing
+              {deletingProjectName ? ` "${deletingProjectName}"` : ' the project'}.
+            </p>
           </div>
         </div>
       )}

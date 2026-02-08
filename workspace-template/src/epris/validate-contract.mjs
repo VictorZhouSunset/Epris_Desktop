@@ -2,6 +2,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const ID_RE = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
+const UI_BY_TYPE = {
+  number: new Set(['slider', 'input']),
+  color: new Set(['color']),
+  select: new Set(['select']),
+  boolean: new Set(['toggle', 'checkbox']),
+  text: new Set(['text', 'textarea']),
+};
 
 function fail(message) {
   console.error(`[epris:validate] ${message}`);
@@ -59,6 +66,19 @@ function validateControls(controlsPath) {
     }
     if (!['number', 'color', 'select', 'boolean', 'text'].includes(c.type)) {
       fail(`control '${c.id}' has invalid type '${c.type}'`);
+    }
+
+    if (c.ui != null) {
+      if (typeof c.ui !== 'string') {
+        fail(`control '${c.id}' ui must be a string`);
+      } else {
+        const allowed = UI_BY_TYPE[c.type];
+        if (allowed && !allowed.has(c.ui)) {
+          fail(
+            `control '${c.id}' has invalid ui '${c.ui}' for type '${c.type}' (allowed: ${Array.from(allowed).join(', ')})`,
+          );
+        }
+      }
     }
 
     if (c.type === 'select') {

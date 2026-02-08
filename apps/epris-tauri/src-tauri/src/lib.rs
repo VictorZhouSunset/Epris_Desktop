@@ -13,11 +13,15 @@ mod sandbox;
 mod toolchain;
 mod maintenance;
 mod install_log;
+mod agent_plan;
 mod ui_props;
 mod ui_objects;
 
-use std::sync::Mutex;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tauri::Manager;
+use tokio::time::sleep;
 
 pub use gate::GateResult;
 
@@ -31,6 +35,31 @@ pub mod provider;
 use crate::state_manager::{StateManager, AppStateStore};
 use crate::environment::{EnvironmentManager, EnvironmentStatus};
 // Duplicate Manager import removed
+
+const ENV_STATUS_CACHE_TTL: Duration = Duration::from_millis(1500);
+const ENV_STATUS_LOCK_POLL_MS: u64 = 25;
+
+#[derive(Clone)]
+struct EnvStatusCacheEntry {
+    checked_at: Instant,
+    status: EnvironmentStatus,
+}
+
+#[derive(Default)]
+struct EnvStatusDedupState {
+    cache: HashMap<String, EnvStatusCacheEntry>,
+    in_flight: HashSet<String>,
+}
+
+static ENV_STATUS_DEDUP_STATE: OnceLock<Mutex<EnvStatusDedupState>> = OnceLock::new();
+
+fn env_status_dedup_state() -> &'static Mutex<EnvStatusDedupState> {
+    ENV_STATUS_DEDUP_STATE.get_or_init(|| Mutex::new(EnvStatusDedupState::default()))
+}
+
+fn env_status_key(provider: &str, workspace_path: Option<&str>) -> String {
+    format!("{}::{}", provider, workspace_path.unwrap_or("<none>"))
+}
 
 fn maybe_migrate_legacy_app_data_dir(app_handle: &tauri::AppHandle) {
     let Ok(current_dir) = app_handle.path().app_local_data_dir() else {
@@ -217,12 +246,111 @@ pub fn trigger_cleanup(app_handle: &tauri::AppHandle) {
 
 #[tauri::command]
 async fn get_environment_status(app_handle: tauri::AppHandle, provider: String, workspace_path: Option<String>) -> Result<EnvironmentStatus, String> {
-    let app_dir = app_handle.path().app_local_data_dir()
+    let total_started = Instant::now();
+    let key = env_status_key(&provider, workspace_path.as_deref());
+    let app_dir = app_handle
+        .path()
+        .app_local_data_dir()
         .map_err(|e| format!("Failed to get app data dir: {}", e))?;
-    tauri::async_runtime::spawn_blocking(move || {
+    let app_dir_for_log = app_handle.path().app_local_data_dir().ok();
+    let ws_for_log = workspace_path.as_deref().map(std::path::Path::new);
+
+    let log_line = |line: &str| {
+        crate::install_log::log_env_check(app_dir_for_log.as_deref(), ws_for_log, line);
+        println!("[Epris][EnvCheck] {}", line);
+    };
+
+    // Fast return from short-lived cache.
+    {
+        let guard = match env_status_dedup_state().lock() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(),
+        };
+        if let Some(entry) = guard.cache.get(&key) {
+            if entry.checked_at.elapsed() <= ENV_STATUS_CACHE_TTL {
+                log_line(&format!(
+                    "get_environment_status provider={} cache=hit total={} ms",
+                    provider,
+                    total_started.elapsed().as_millis()
+                ));
+                return Ok(entry.status.clone());
+            }
+        }
+    }
+
+    // In-flight dedup: if another identical check is running, wait for it and then reuse cache.
+    loop {
+        let should_wait = {
+            let mut guard = match env_status_dedup_state().lock() {
+                Ok(g) => g,
+                Err(e) => e.into_inner(),
+            };
+
+            if let Some(entry) = guard.cache.get(&key) {
+                if entry.checked_at.elapsed() <= ENV_STATUS_CACHE_TTL {
+                    log_line(&format!(
+                        "get_environment_status provider={} cache=hit_after_wait total={} ms",
+                        provider,
+                        total_started.elapsed().as_millis()
+                    ));
+                    return Ok(entry.status.clone());
+                }
+            }
+
+            if !guard.in_flight.contains(&key) {
+                guard.in_flight.insert(key.clone());
+                false
+            } else {
+                true
+            }
+        };
+
+        if !should_wait {
+            break;
+        }
+        sleep(Duration::from_millis(ENV_STATUS_LOCK_POLL_MS)).await;
+    }
+
+    let provider_for_compute = provider.clone();
+    let workspace_for_compute = workspace_path.clone();
+
+    let compute_result: Result<EnvironmentStatus, String> = match tauri::async_runtime::spawn_blocking(move || {
         let env_manager = EnvironmentManager::new(app_dir);
-        Ok(env_manager.check_environment(&provider, workspace_path.as_deref()))
-    }).await.map_err(|e| e.to_string())?
+        Ok(env_manager.check_environment(&provider_for_compute, workspace_for_compute.as_deref()))
+    })
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => Err(e.to_string()),
+    };
+
+    {
+        let mut guard = match env_status_dedup_state().lock() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(),
+        };
+        guard.in_flight.remove(&key);
+        if let Ok(status) = &compute_result {
+            guard.cache.insert(
+                key.clone(),
+                EnvStatusCacheEntry {
+                    checked_at: Instant::now(),
+                    status: status.clone(),
+                },
+            );
+        }
+        // Keep cache bounded and fresh.
+        guard
+            .cache
+            .retain(|_, entry| entry.checked_at.elapsed() <= Duration::from_secs(30));
+    }
+
+    log_line(&format!(
+        "get_environment_status provider={} cache=miss total={} ms",
+        provider,
+        total_started.elapsed().as_millis()
+    ));
+    compute_result
 }
 
 #[tauri::command]
@@ -317,6 +445,7 @@ pub fn run() {
             maintenance::reset_user_data,
             maintenance::set_debug_force_dependency_request,
             maintenance::set_baseline_packages_ack,
+            agent_plan::get_agent_plan_state,
             assets::list_assets,
             assets::upload_asset,
             assets::delete_asset,
